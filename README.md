@@ -267,6 +267,25 @@ Deprecation is used to inform developers that some APIs and tools are no longer 
 4. Removal After Migration Period
   - After the 3-month migration period ends, deprecated APIs, tools, or parameters are removed in a manner consistent with semantic versioning (major version changes may include breaking removals).
 
+## Telemetry
+
+TensorRT LLM collects anonymous telemetry to help us understand what features are used and what to focus on. We collect:
+
+- Ingress point (e.g., LLM API, CLI)
+- Deployment duration
+- GPU SKUs
+- Number of nodes
+- Model architecture (for known architectures only)
+- Features used (e.g., quantization, parallelism, speculative decoding, disaggregated serving, LoRA)
+
+**No user identifying information or persistent identifier is collected.** This data is used in aggregate to understand usage patterns and prioritize development efforts.
+
+To disable telemetry, use any of the following methods:
+
+- **Environment variable**: Set `TELEMETRY_DISABLED=true` or `DO_NOT_TRACK=true`
+- **CLI**: Pass `--telemetry_disabled`
+- **LLM API**: Set `telemetry_disabled=True` (also supported via config file)
+
 ## Useful Links
 - [Quantized models on Hugging Face](https://huggingface.co/collections/nvidia/model-optimizer-66aa84f7966b3150262481a4): A growing collection of quantized (e.g., FP8, FP4) and optimized LLMs, including [DeepSeek FP4](https://huggingface.co/nvidia/DeepSeek-R1-FP4), ready for fast inference with TensorRT LLM.
 - [NVIDIA Dynamo](https://github.com/ai-dynamo/dynamo): A datacenter scale distributed inference serving framework that works seamlessly with TensorRT LLM.
