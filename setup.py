@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2022-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2022-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -415,12 +415,13 @@ setup(
     license_files=get_license(),
     entry_points={
         'console_scripts': [
+            'trtllm=trtllm_cli.main:main',
             'trtllm-build=tensorrt_llm.commands.build:main',
             'trtllm-prune=tensorrt_llm.commands.prune:main',
             'trtllm-refit=tensorrt_llm.commands.refit:main',
-            'trtllm-bench=tensorrt_llm.commands.bench:main',
-            'trtllm-serve=tensorrt_llm.commands.serve:main',
-            'trtllm-eval=tensorrt_llm.commands.eval:main'
+            'trtllm-bench=trtllm_cli.main:bench_entry',
+            'trtllm-serve=trtllm_cli.main:serve_entry',
+            'trtllm-eval=trtllm_cli.main:eval_entry'
         ],
     },
     scripts=['tensorrt_llm/llmapi/trtllm-llmapi-launch'],

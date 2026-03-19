@@ -947,6 +947,19 @@ def test_trtllm_bench_help_sanity(model_name):
     check_call(f"trtllm-bench --model {model_name} latency --help", shell=True)
 
 
+def test_trtllm_cli_help_sanity():
+    '''
+    Sanity check that the lightweight top-level CLI is available in installed environments.
+    '''
+    check_call("trtllm --help", shell=True)
+    check_call("trtllm serve --help", shell=True)
+    check_call("trtllm-serve --help", shell=True)
+    check_call("trtllm bench --help", shell=True)
+    check_call("trtllm-bench --help", shell=True)
+    check_call("trtllm eval --help", shell=True)
+    check_call("trtllm-eval --help", shell=True)
+
+
 @pytest.mark.parametrize("request_rate", [False, True],
                          ids=["", "enable_request_rate"])
 @pytest.mark.parametrize("concurrency", [False, True],
