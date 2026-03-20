@@ -18,6 +18,24 @@ from __future__ import annotations
 import click
 
 from trtllm_cli._dispatch import delegate_click_command
+from trtllm_cli._help import (HelpPassthroughArgument,
+                              HelpPassthroughOption, echo_lightweight_help,
+                              should_show_lightweight_help)
+from trtllm_cli._serve_metadata import (
+    DISAGGREGATED_HELP,
+    DISAGGREGATED_MPI_WORKER_HELP,
+    DISAGGREGATED_MPI_WORKER_SHORT_HELP,
+    DISAGGREGATED_SHORT_HELP,
+    MM_EMBEDDING_SERVE_HELP,
+    MM_EMBEDDING_SERVE_SHORT_HELP,
+    SERVE_HELP,
+    SERVE_SHORT_HELP,
+    add_disaggregated_mpi_worker_options,
+    add_disaggregated_options,
+    add_mm_embedding_serve_options,
+    add_serve_options,
+)
+from trtllm_cli._validation import validate_json_string, validate_yaml_file
 
 PROXY_CONTEXT_SETTINGS = {
     "allow_extra_args": True,
@@ -34,6 +52,38 @@ def _delegate_to_legacy_serve() -> None:
     )
 
 
+def _validate_serve_options(extra_llm_api_options: str | None,
+                            metadata_server_config_file: str | None,
+                            extra_visual_gen_options: str | None,
+                            media_io_kwargs: str | None) -> None:
+    validate_yaml_file(extra_llm_api_options, param_hint="--config")
+    validate_yaml_file(metadata_server_config_file,
+                       param_hint="--metadata_server_config_file")
+    validate_yaml_file(extra_visual_gen_options,
+                       param_hint="--extra_visual_gen_options")
+    validate_json_string(media_io_kwargs, param_hint="--media_io_kwargs")
+
+
+def _validate_mm_embedding_serve_options(extra_encoder_options: str | None,
+                                         metadata_server_config_file:
+                                         str | None) -> None:
+    validate_yaml_file(extra_encoder_options, param_hint="--config")
+    validate_yaml_file(metadata_server_config_file,
+                       param_hint="--metadata_server_config_file")
+
+
+def _validate_disaggregated_options(config_file: str | None,
+                                    metadata_server_config_file:
+                                    str | None) -> None:
+    validate_yaml_file(config_file, param_hint="--config")
+    validate_yaml_file(metadata_server_config_file,
+                       param_hint="--metadata_server_config_file")
+
+
+def _validate_disaggregated_mpi_worker_options(config_file: str | None) -> None:
+    validate_yaml_file(config_file, param_hint="--config")
+
+
 class DefaultGroup(click.Group):
     """Click group that preserves trtllm-serve's default serve subcommand."""
 
@@ -45,49 +95,92 @@ class DefaultGroup(click.Group):
 
 @click.command(
     name="serve",
-    short_help="Serve a model with the OpenAI-compatible API.",
+    short_help=SERVE_SHORT_HELP,
+    help=SERVE_HELP,
     add_help_option=False,
     context_settings=PROXY_CONTEXT_SETTINGS,
 )
-@click.argument("args", nargs=-1, type=click.UNPROCESSED)
-def serve_proxy(args) -> None:
-    del args
+@add_serve_options(model_required=True,
+                   option_cls=HelpPassthroughOption,
+                   argument_cls=HelpPassthroughArgument)
+@click.pass_context
+def serve_proxy(ctx, model: str | None, **_kwargs) -> None:
+    if should_show_lightweight_help(ctx, ctx.args):
+        if ctx.parent:
+            if ctx.parent.parent:
+                echo_lightweight_help(ctx,
+                                      parent=ctx.parent.parent,
+                                      info_name=ctx.parent.info_name)
+            else:
+                echo_lightweight_help(ctx, info_name=ctx.parent.info_name)
+            return
+        echo_lightweight_help(ctx)
+        return
+    if model is None:
+        raise click.UsageError("Missing argument 'MODEL'.")
+    _validate_serve_options(_kwargs.get("extra_llm_api_options"),
+                            _kwargs.get("metadata_server_config_file"),
+                            _kwargs.get("extra_visual_gen_options"),
+                            _kwargs.get("media_io_kwargs"))
     _delegate_to_legacy_serve()
 
 
 @click.command(
     name="disaggregated",
-    short_help="Launch a disaggregated serving stack.",
+    short_help=DISAGGREGATED_SHORT_HELP,
+    help=DISAGGREGATED_HELP,
     add_help_option=False,
     context_settings=PROXY_CONTEXT_SETTINGS,
 )
-@click.argument("args", nargs=-1, type=click.UNPROCESSED)
-def disaggregated_proxy(args) -> None:
-    del args
+@add_disaggregated_options(option_cls=HelpPassthroughOption)
+@click.pass_context
+def disaggregated_proxy(ctx, **_kwargs) -> None:
+    if should_show_lightweight_help(ctx, ctx.args):
+        echo_lightweight_help(ctx)
+        return
+    _validate_disaggregated_options(_kwargs.get("config_file"),
+                                    _kwargs.get(
+                                        "metadata_server_config_file"))
     _delegate_to_legacy_serve()
 
 
 @click.command(
     name="disaggregated_mpi_worker",
-    short_help="Start a disaggregated MPI worker.",
+    short_help=DISAGGREGATED_MPI_WORKER_SHORT_HELP,
+    help=DISAGGREGATED_MPI_WORKER_HELP,
     add_help_option=False,
     context_settings=PROXY_CONTEXT_SETTINGS,
 )
-@click.argument("args", nargs=-1, type=click.UNPROCESSED)
-def disaggregated_mpi_worker_proxy(args) -> None:
-    del args
+@add_disaggregated_mpi_worker_options(option_cls=HelpPassthroughOption)
+@click.pass_context
+def disaggregated_mpi_worker_proxy(ctx, **_kwargs) -> None:
+    if should_show_lightweight_help(ctx, ctx.args):
+        echo_lightweight_help(ctx)
+        return
+    _validate_disaggregated_mpi_worker_options(_kwargs.get("config_file"))
     _delegate_to_legacy_serve()
 
 
 @click.command(
     name="mm_embedding_serve",
-    short_help="Serve multimodal embedding models.",
+    short_help=MM_EMBEDDING_SERVE_SHORT_HELP,
+    help=MM_EMBEDDING_SERVE_HELP,
     add_help_option=False,
     context_settings=PROXY_CONTEXT_SETTINGS,
 )
-@click.argument("args", nargs=-1, type=click.UNPROCESSED)
-def mm_embedding_serve_proxy(args) -> None:
-    del args
+@add_mm_embedding_serve_options(model_required=True,
+                                option_cls=HelpPassthroughOption,
+                                argument_cls=HelpPassthroughArgument)
+@click.pass_context
+def mm_embedding_serve_proxy(ctx, model: str | None, **_kwargs) -> None:
+    if should_show_lightweight_help(ctx, ctx.args):
+        echo_lightweight_help(ctx)
+        return
+    if model is None:
+        raise click.UsageError("Missing argument 'MODEL'.")
+    _validate_mm_embedding_serve_options(_kwargs.get("extra_encoder_options"),
+                                         _kwargs.get(
+                                             "metadata_server_config_file"))
     _delegate_to_legacy_serve()
 
 

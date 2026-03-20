@@ -20,6 +20,8 @@ from pathlib import Path
 import click
 
 from trtllm_cli._dispatch import delegate_click_command
+from trtllm_cli._help import (NotRequiredForHelp, echo_lightweight_help,
+                              should_show_lightweight_help)
 
 LOG_LEVELS = (
     "internal_error",
@@ -44,28 +46,22 @@ def _delegate_to_legacy_bench() -> None:
         standalone_prog_name="trtllm-bench",
     )
 
-
-class NotRequiredForHelp(click.Option):
-    """A click.Option that is not enforced as required when --help is in args."""
-
-    def handle_parse_result(self, ctx, opts, args):
-        help_flags = ctx.help_option_names or ["--help"]
-        if any(arg in help_flags for arg in args):
-            self.required = False
-        return super().handle_parse_result(ctx, opts, args)
-
-
 def _proxy_subcommand(name: str, short_help: str):
 
     @click.command(
         name=name,
         short_help=short_help,
+        help=f"{short_help} Additional arguments are forwarded to the "
+        "legacy trtllm-bench command at runtime.",
         add_help_option=False,
         context_settings=PROXY_CONTEXT_SETTINGS,
     )
     @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-    def command(args) -> None:
-        del args
+    @click.pass_context
+    def command(ctx, args) -> None:
+        if should_show_lightweight_help(ctx, args):
+            echo_lightweight_help(ctx)
+            return
         _delegate_to_legacy_bench()
 
     return command

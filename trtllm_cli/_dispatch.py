@@ -52,6 +52,16 @@ def invoke_entry(command, *, prog_name: str, root_mode: bool = False):
         return command.main(args=argv, prog_name=prog_name)
 
 
+def current_invocation_argv() -> tuple[str, ...]:
+    if _current_invocation is not None:
+        return _current_invocation.argv
+    return tuple(sys.argv[1:])
+
+
+def current_delegated_argv(top_level_command: str) -> tuple[str, ...]:
+    return tuple(_get_delegated_argv(top_level_command))
+
+
 def _get_delegated_argv(top_level_command: str) -> list[str]:
     if _current_invocation is None:
         return list(sys.argv[1:])

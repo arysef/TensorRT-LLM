@@ -952,12 +952,24 @@ def test_trtllm_cli_help_sanity():
     Sanity check that the lightweight top-level CLI is available in installed environments.
     '''
     check_call("trtllm --help", shell=True)
+    check_call("trtllm build --help", shell=True)
+    check_call("trtllm-build --help", shell=True)
+    check_call("trtllm prune --help", shell=True)
+    check_call("trtllm-prune --help", shell=True)
+    check_call("trtllm refit --help", shell=True)
+    check_call("trtllm-refit --help", shell=True)
     check_call("trtllm serve --help", shell=True)
     check_call("trtllm-serve --help", shell=True)
+    check_call("trtllm serve dummy-model --help", shell=True)
+    check_call("trtllm-serve dummy-model --help", shell=True)
     check_call("trtllm bench --help", shell=True)
     check_call("trtllm-bench --help", shell=True)
+    check_call("trtllm bench throughput --help", shell=True)
+    check_call("trtllm-bench throughput --help", shell=True)
     check_call("trtllm eval --help", shell=True)
     check_call("trtllm-eval --help", shell=True)
+    check_call("trtllm eval mmlu --help", shell=True)
+    check_call("trtllm-eval mmlu --help", shell=True)
 
 
 @pytest.mark.parametrize("request_rate", [False, True],

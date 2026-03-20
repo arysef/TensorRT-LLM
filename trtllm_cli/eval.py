@@ -17,7 +17,11 @@ from __future__ import annotations
 
 import click
 
-from trtllm_cli._dispatch import delegate_click_command
+from trtllm_cli._dispatch import current_invocation_argv, delegate_click_command
+from trtllm_cli._help import (NotRequiredForHelp, echo_lightweight_help,
+                              has_help_flag,
+                              should_show_lightweight_help)
+from trtllm_cli._validation import validate_yaml_file
 
 LOG_LEVELS = (
     "internal_error",
@@ -48,12 +52,17 @@ def _proxy_subcommand(name: str, short_help: str):
     @click.command(
         name=name,
         short_help=short_help,
+        help=f"{short_help} Additional arguments are forwarded to the "
+        "legacy trtllm-eval command at runtime.",
         add_help_option=False,
         context_settings=PROXY_CONTEXT_SETTINGS,
     )
     @click.argument("args", nargs=-1, type=click.UNPROCESSED)
-    def command(args) -> None:
-        del args
+    @click.pass_context
+    def command(ctx, args) -> None:
+        if should_show_lightweight_help(ctx, args):
+            echo_lightweight_help(ctx)
+            return
         _delegate_to_legacy_eval()
 
     return command
@@ -64,6 +73,7 @@ def _proxy_subcommand(name: str, short_help: str):
     "--model",
     required=True,
     type=str,
+    cls=NotRequiredForHelp,
     help="model name | HF checkpoint path | TensorRT engine path",
 )
 @click.option(
@@ -156,7 +166,8 @@ def _proxy_subcommand(name: str, short_help: str):
               is_flag=True,
               default=False,
               help="Flag for disabling KV cache reuse.")
-def cli(model: str, tokenizer: str | None, custom_tokenizer: str | None,
+@click.pass_context
+def cli(ctx, model: str, tokenizer: str | None, custom_tokenizer: str | None,
         backend: str, log_level: str, max_beam_width: int,
         max_batch_size: int, max_num_tokens: int, max_seq_len: int | None,
         tp_size: int, pp_size: int, ep_size: int | None,
@@ -165,9 +176,12 @@ def cli(model: str, tokenizer: str | None, custom_tokenizer: str | None,
         revision: str | None, extra_llm_api_options: str | None,
         disable_kv_cache_reuse: bool) -> None:
     """Evaluate models with TensorRT-LLM."""
+    if not has_help_flag(current_invocation_argv(), ctx.help_option_names):
+        validate_yaml_file(extra_llm_api_options, param_hint="--config")
     del model
     del tokenizer
     del custom_tokenizer
+    del ctx
     del backend
     del log_level
     del max_beam_width

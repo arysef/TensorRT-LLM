@@ -7,7 +7,7 @@ import socket
 import subprocess  # nosec B404
 import sys
 from pathlib import Path
-from typing import Any, Dict, Literal, Mapping, Optional, Sequence
+from typing import Any, Optional
 
 import click
 import torch
@@ -15,6 +15,12 @@ import yaml
 from strenum import StrEnum
 from torch.cuda import device_count
 
+from trtllm_cli._serve_metadata import (
+    add_disaggregated_mpi_worker_options,
+    add_disaggregated_options,
+    add_mm_embedding_serve_options,
+    add_serve_options,
+)
 from tensorrt_llm import LLM as PyTorchLLM
 from tensorrt_llm import MultimodalEncoder
 from tensorrt_llm._tensorrt_engine import LLM
@@ -34,22 +40,13 @@ from tensorrt_llm.llmapi.disagg_utils import (DisaggClusterConfig,
 from tensorrt_llm.llmapi.llm_args import TorchLlmArgs, TrtLlmArgs
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_dict
 from tensorrt_llm.llmapi.mpi_session import find_free_ipc_addr
-from tensorrt_llm.llmapi.reasoning_parser import ReasoningParserFactory
-from tensorrt_llm.logger import logger, severity_map
+from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import CpType
 from tensorrt_llm.serve import OpenAIDisaggServer, OpenAIServer
-from tensorrt_llm.serve.tool_parser import ToolParserFactory
 from tensorrt_llm.tools.importlib_utils import import_custom_module_from_dir
 
 # Global variable to store the Popen object of the child process
 _child_p_global: Optional[subprocess.Popen] = None
-
-
-def help_info_with_stability_tag(
-        help_str: str, tag: Literal["stable", "beta", "prototype",
-                                    "deprecated"]) -> str:
-    """Append stability info to help string."""
-    return f":tag:`{tag}` {help_str}"
 
 
 def _signal_handler_cleanup_child(signum, frame):
@@ -493,284 +490,8 @@ def launch_visual_gen_server(
     asyncio.run(server(host, port))
 
 
-class ChoiceWithAlias(click.Choice):
-
-    def __init__(self,
-                 choices: Sequence[str],
-                 aliases: Mapping[str, str],
-                 case_sensitive: bool = True) -> None:
-        super().__init__(choices, case_sensitive)
-        self.aliases = aliases
-
-    def to_info_dict(self) -> Dict[str, Any]:
-        info_dict = super().to_info_dict()
-        info_dict["aliases"] = self.aliases
-        return info_dict
-
-    def convert(self, value: Any, param: Optional["click.Parameter"],
-                ctx: Optional["click.Context"]) -> Any:
-        if value in self.aliases:
-            value = self.aliases[value]
-        return super().convert(value, param, ctx)
-
-
 @click.command("serve")
-@click.argument("model", type=str)
-@click.option(
-    "--tokenizer",
-    type=str,
-    default=None,
-    help=help_info_with_stability_tag(
-        "Path or name of the tokenizer. When using the PyTorch backend, "
-        "this replaces the default HuggingFace tokenizer.", "beta"))
-@click.option(
-    "--custom_tokenizer",
-    type=str,
-    default=None,
-    help=help_info_with_stability_tag(
-        "Custom tokenizer type: alias (e.g., 'deepseek_v32') or Python import path "
-        "(e.g., 'tensorrt_llm.tokenizer.deepseek_v32.DeepseekV32Tokenizer').",
-        "prototype"))
-@click.option("--host",
-              type=str,
-              default="localhost",
-              help=help_info_with_stability_tag("Hostname of the server.",
-                                                "beta"))
-@click.option("--port",
-              type=int,
-              default=8000,
-              help=help_info_with_stability_tag("Port of the server.", "beta"))
-@click.option(
-    "--backend",
-    type=ChoiceWithAlias(["pytorch", "tensorrt", "_autodeploy"],
-                         {"trt": "tensorrt"}),
-    default="pytorch",
-    help=help_info_with_stability_tag(
-        "The backend to use to serve the model. Default is pytorch backend.",
-        "beta"))
-@click.option(
-    "--custom_module_dirs",
-    type=click.Path(exists=True,
-                    readable=True,
-                    path_type=Path,
-                    resolve_path=True),
-    default=None,
-    multiple=True,
-    help=help_info_with_stability_tag(
-        "Paths to custom module directories to import.", "prototype"),
-)
-@click.option('--log_level',
-              type=click.Choice(severity_map.keys()),
-              default='info',
-              help=help_info_with_stability_tag("The logging level.", "beta"))
-@click.option("--max_beam_width",
-              type=int,
-              default=BuildConfig.model_fields["max_beam_width"].default,
-              help=help_info_with_stability_tag(
-                  "Maximum number of beams for beam search decoding.", "beta"))
-@click.option("--max_batch_size",
-              type=int,
-              default=BuildConfig.model_fields["max_batch_size"].default,
-              help=help_info_with_stability_tag(
-                  "Maximum number of requests that the engine can schedule.",
-                  "beta"))
-@click.option(
-    "--max_num_tokens",
-    type=int,
-    default=BuildConfig.model_fields["max_num_tokens"].default,
-    help=help_info_with_stability_tag(
-        "Maximum number of batched input tokens after padding is removed in each batch.",
-        "beta"))
-@click.option(
-    "--max_seq_len",
-    type=int,
-    default=BuildConfig.model_fields["max_seq_len"].default,
-    help=help_info_with_stability_tag(
-        "Maximum total length of one request, including prompt and outputs. "
-        "If unspecified, the value is deduced from the model config.", "beta"))
-@click.option("--tensor_parallel_size",
-              "--tp_size",
-              type=int,
-              default=1,
-              help=help_info_with_stability_tag('Tensor parallelism size.',
-                                                'beta'))
-@click.option("--pipeline_parallel_size",
-              "--pp_size",
-              type=int,
-              default=1,
-              help=help_info_with_stability_tag('Pipeline parallelism size.',
-                                                'beta'))
-@click.option("--context_parallel_size",
-              "--cp_size",
-              type=int,
-              default=1,
-              help=help_info_with_stability_tag('Context parallelism size.',
-                                                'beta'))
-@click.option("--moe_expert_parallel_size",
-              "--ep_size",
-              type=int,
-              default=None,
-              help=help_info_with_stability_tag("expert parallelism size",
-                                                "beta"))
-@click.option(
-    "--moe_cluster_parallel_size",
-    "--cluster_size",
-    type=int,
-    default=None,
-    help=help_info_with_stability_tag(
-        "[Deprecated] Expert cluster parallelism size. "
-        "This option is no longer supported and will be removed in a future release.",
-        "deprecated"))
-@click.option(
-    "--gpus_per_node",
-    type=int,
-    default=None,
-    help=help_info_with_stability_tag(
-        "Number of GPUs per node. Default to None, and it will be detected automatically.",
-        "beta"))
-@click.option("--free_gpu_memory_fraction",
-              "--kv_cache_free_gpu_memory_fraction",
-              type=float,
-              default=0.9,
-              help=help_info_with_stability_tag(
-                  "Free GPU memory fraction reserved for KV Cache, "
-                  "after allocating model weights and buffers.", "beta"))
-@click.option(
-    "--kv_cache_dtype",
-    type=click.Choice(("auto", "fp8", "nvfp4")),
-    default="auto",
-    help=help_info_with_stability_tag(
-        "KV cache quantization dtype for PyTorch backend. "
-        "'auto' uses checkpoint/model metadata; explicit values force override.",
-        "prototype"))
-@click.option("--num_postprocess_workers",
-              type=int,
-              default=0,
-              help=help_info_with_stability_tag(
-                  "Number of workers to postprocess raw responses "
-                  "to comply with OpenAI protocol.", "prototype"))
-@click.option("--trust_remote_code",
-              is_flag=True,
-              default=False,
-              help=help_info_with_stability_tag("Flag for HF transformers.",
-                                                "beta"))
-@click.option("--hf_revision",
-              "--revision",
-              "revision",
-              type=str,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "The revision to use for the HuggingFace model "
-                  "(branch name, tag name, or commit id). "
-                  "Prefer --hf_revision over --revision.", "beta"))
-@click.option(
-    "--config",
-    "--extra_llm_api_options",
-    "extra_llm_api_options",
-    type=str,
-    default=None,
-    help=help_info_with_stability_tag(
-        "Path to a YAML file that overwrites the parameters specified by trtllm-serve. "
-        "Can be specified as either --config or --extra_llm_api_options.",
-        "prototype"))
-@click.option(
-    "--reasoning_parser",
-    type=click.Choice(ReasoningParserFactory.keys()),
-    default=None,
-    help=help_info_with_stability_tag(
-        "Specify the parser for reasoning models.", "prototype"),
-)
-@click.option(
-    "--tool_parser",
-    type=click.Choice(ToolParserFactory.parsers.keys()),
-    default=None,
-    help=help_info_with_stability_tag("Specify the parser for tool models.",
-                                      "prototype"),
-)
-@click.option("--metadata_server_config_file",
-              type=str,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "Path to metadata server config file", "prototype"))
-@click.option(
-    "--server_role",
-    type=str,
-    default=None,
-    help=help_info_with_stability_tag(
-        "Server role for disaggregated serving. "
-        "CONTEXT=prefill (prompt processing), GENERATION=decode (token generation), "
-        "MM_ENCODER=multimodal encoder, VISUAL_GEN=visual generation. "
-        "Required when using service registry.", "prototype"))
-@click.option(
-    "--fail_fast_on_attention_window_too_large",
-    is_flag=True,
-    default=True,
-    help=help_info_with_stability_tag(
-        "[Deprecated] Exit with runtime error when attention window is too large "
-        "to fit even a single sequence in the KV cache. Now defaults to True. "
-        "This flag only affects the TRT backend and will be removed in a future release.",
-        "deprecated"))
-@click.option("--otlp_traces_endpoint",
-              type=str,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "Target URL to which OpenTelemetry traces will be sent.",
-                  "prototype"))
-@click.option("--disagg_cluster_uri",
-              type=str,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "URI of the disaggregated cluster.", "prototype"))
-@click.option("--enable_chunked_prefill",
-              is_flag=True,
-              default=False,
-              help=help_info_with_stability_tag("Enable chunked prefill",
-                                                "prototype"))
-@click.option("--enable_attention_dp",
-              is_flag=True,
-              default=False,
-              help=help_info_with_stability_tag(
-                  "Enable attention data parallel.", "beta"))
-@click.option("--media_io_kwargs",
-              type=str,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "Keyword arguments for media I/O.", "prototype"))
-@click.option("--video_pruning_rate",
-              type=float,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "Pruning rate for video frames in multimodal models. "
-                  "Applied by Efficient Video Sampling (EVS). "
-                  "None disables EVS, values in [0, 1) enable pruning.",
-                  "prototype"))
-@click.option("--chat_template",
-              type=str,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "Specify a custom chat template. "
-                  "Can be a file path or one-liner template string",
-                  "prototype"))
-@click.option(
-    "--grpc",
-    is_flag=True,
-    default=False,
-    help="Run gRPC server instead of OpenAI HTTP server. "
-    "gRPC server accepts pre-tokenized requests and returns raw token IDs.")
-@click.option(
-    "--served_model_name",
-    type=str,
-    default=None,
-    help=help_info_with_stability_tag(
-        "The model name used in the API. If not specified, the model path is "
-        "used as the model name. This is useful when the model path is long or "
-        "when you want to expose a custom name to clients.", "prototype"))
-@click.option("--extra_visual_gen_options",
-              type=str,
-              default=None,
-              help=help_info_with_stability_tag(
-                  "Path to a YAML file with extra VISUAL_GEN model options.",
-                  "prototype"))
+@add_serve_options(model_required=True)
 def serve(
         model: str, tokenizer: Optional[str], custom_tokenizer: Optional[str],
         host: str, port: int, log_level: str, backend: str, max_beam_width: int,
@@ -943,66 +664,7 @@ def serve(
 
 
 @click.command("mm_embedding_serve")
-@click.argument("model", type=str)
-@click.option("--host",
-              type=str,
-              default="localhost",
-              help="Hostname of the server.")
-@click.option("--port", type=int, default=8000, help="Port of the server.")
-@click.option('--log_level',
-              type=click.Choice(severity_map.keys()),
-              default='info',
-              help="The logging level.")
-@click.option("--max_batch_size",
-              type=int,
-              default=BuildConfig.model_fields["max_batch_size"].default,
-              help="Maximum number of requests that the engine can schedule.")
-@click.option(
-    "--max_num_tokens",
-    type=int,
-    default=16384,  # set higher default max_num_tokens for multimodal encoder
-    help=
-    "Maximum number of batched input tokens after padding is removed in each batch."
-)
-@click.option("--gpus_per_node",
-              type=int,
-              default=None,
-              help="Number of GPUs per node. Default to None, and it will be "
-              "detected automatically.")
-@click.option("--trust_remote_code",
-              is_flag=True,
-              default=False,
-              help="Flag for HF transformers.")
-@click.option(
-    "--config",
-    "--extra_encoder_options",
-    "extra_encoder_options",
-    type=str,
-    default=None,
-    help=
-    "Path to a YAML file that overwrites the parameters specified by trtllm-serve. "
-    "Prefer --config over --extra_encoder_options.")
-@click.option("--hf_revision",
-              "--revision",
-              "revision",
-              type=str,
-              default=None,
-              help="The revision to use for the HuggingFace model "
-              "(branch name, tag name, or commit id).")
-@click.option("--free_gpu_memory_fraction",
-              type=float,
-              default=0.9,
-              help="Free GPU memory fraction reserved for KV Cache, "
-              "after allocating model weights and buffers.")
-@click.option("--tensor_parallel_size",
-              "--tp_size",
-              type=int,
-              default=1,
-              help="Tensor parallelism size.")
-@click.option("--metadata_server_config_file",
-              type=str,
-              default=None,
-              help="Path to metadata server config file")
+@add_mm_embedding_serve_options(model_required=True)
 def serve_encoder(model: str, host: str, port: int, log_level: str,
                   max_batch_size: int, max_num_tokens: int,
                   gpus_per_node: Optional[int], trust_remote_code: bool,
@@ -1043,40 +705,7 @@ def serve_encoder(model: str, host: str, port: int, log_level: str,
 
 
 @click.command("disaggregated")
-@click.option("-c",
-              "--config",
-              "--config_file",
-              "config_file",
-              type=str,
-              default=None,
-              help="Path to the disaggregated serving configuration YAML file.")
-@click.option("-m",
-              "--metadata_server_config_file",
-              type=str,
-              default=None,
-              help="Path to metadata server config file")
-@click.option("-t",
-              "--server_start_timeout",
-              type=int,
-              default=180,
-              help="Server start timeout")
-@click.option("-r",
-              "--request_timeout",
-              type=int,
-              default=180,
-              help="Request timeout")
-@click.option("-l",
-              '--log_level',
-              type=click.Choice(severity_map.keys()),
-              default='info',
-              help="The logging level.")
-@click.option(
-    "--metrics-log-interval",
-    type=int,
-    default=0,
-    help="[Deprecated] The interval of logging metrics in seconds. "
-    "This option is not connected to any functionality and will be removed in a future release."
-)
+@add_disaggregated_options()
 def disaggregated(
     config_file: Optional[str],
     metadata_server_config_file: Optional[str],
@@ -1148,17 +777,7 @@ def set_cuda_device():
 
 
 @click.command("disaggregated_mpi_worker")
-@click.option("-c",
-              "--config",
-              "--config_file",
-              "config_file",
-              type=str,
-              default=None,
-              help="Path to the disaggregated serving configuration YAML file.")
-@click.option('--log_level',
-              type=click.Choice(severity_map.keys()),
-              default='info',
-              help="The logging level.")
+@add_disaggregated_mpi_worker_options()
 def disaggregated_mpi_worker(config_file: Optional[str], log_level: str):
     """Launching disaggregated MPI worker"""
 
