@@ -12,8 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from __future__ import annotations
-
 import importlib
 from typing import Optional
 
@@ -209,13 +207,13 @@ def main(ctx, model: str, tokenizer: Optional[str],
         "kv_cache_config": kv_cache_config,
     }
 
-    if backend == "pytorch":
+    if backend == 'pytorch':
         llm_cls = PyTorchLLM
         llm_args.update(max_batch_size=max_batch_size,
                         max_num_tokens=max_num_tokens,
                         max_beam_width=max_beam_width,
                         max_seq_len=max_seq_len)
-    elif backend == "tensorrt":
+    elif backend == 'tensorrt':
         llm_cls = LLM
         build_config = BuildConfig(max_batch_size=max_batch_size,
                                    max_num_tokens=max_num_tokens,
@@ -238,6 +236,7 @@ def main(ctx, model: str, tokenizer: Optional[str],
     logger.info(f"TRTLLM initialization time: {elapsed_time:.3f} seconds.")
     profiler.reset("trtllm init")
 
+    # Pass llm to subcommands
     ctx.obj = llm
 
 

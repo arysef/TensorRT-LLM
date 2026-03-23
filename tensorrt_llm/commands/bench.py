@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import importlib
 from pathlib import Path
 from typing import Optional
@@ -114,6 +112,8 @@ def main(
                                    checkpoint_path=model_path,
                                    workspace=workspace,
                                    revision=revision)
+
+    # Create the workspace where we plan to store intermediate files.
     ctx.obj.workspace.mkdir(parents=True, exist_ok=True)
 
 

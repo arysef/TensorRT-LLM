@@ -13,8 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from __future__ import annotations
-
 import importlib
 import os
 from typing import Any
@@ -28,14 +26,12 @@ _runtime_initialized = False
 
 def _add_trt_llm_dll_directory():
     import platform
-
-    on_windows = platform.system() == 'Windows'
+    on_windows = platform.system() == "Windows"
     if on_windows:
         import sysconfig
         from pathlib import Path
-
         os.add_dll_directory(
-            Path(sysconfig.get_paths()['purelib']) / 'tensorrt_llm' / 'libs')
+            Path(sysconfig.get_paths()['purelib']) / "tensorrt_llm" / "libs")
 
 
 def _preload_python_lib():
@@ -54,15 +50,14 @@ def _preload_python_lib():
     can easily find the library.
     """
     import platform
-    on_linux = platform.system() == 'Linux'
+    on_linux = platform.system() == "Linux"
     if on_linux:
-        from ctypes import cdll
         import sys
-
+        from ctypes import cdll
         v_major, v_minor, *_ = sys.version_info
         pythonlib = f'libpython{v_major}.{v_minor}.so'
-        cdll.LoadLibrary(pythonlib + '.1.0')
-        cdll.LoadLibrary(pythonlib)
+        _ = cdll.LoadLibrary(pythonlib + '.1.0')
+        _ = cdll.LoadLibrary(pythonlib)
 
 
 import sys
@@ -78,16 +73,19 @@ def _setup_vendored_triton_kernels():
     3. Imports triton_kernels (caching our version in sys.modules)
     4. Removes the package root from sys.path
     """
+
     # Clear any pre-loaded triton_kernels from cache
     for mod in list(sys.modules.keys()):
-        if mod == 'triton_kernels' or mod.startswith('triton_kernels.'):
+        if mod == "triton_kernels" or mod.startswith("triton_kernels."):
             del sys.modules[mod]
 
+    # Temporarily add our package root to sys.path
     root = Path(__file__).parent.parent
-    vendored = root / 'triton_kernels'
+
+    vendored = root / "triton_kernels"
     if not vendored.exists():
         raise RuntimeError(
-            f'Vendored triton_kernels module not found at {vendored}')
+            f"Vendored triton_kernels module not found at {vendored}")
 
     should_add_to_path = str(root) not in sys.path
     if should_add_to_path:
