@@ -17,8 +17,6 @@ from __future__ import annotations
 
 import importlib
 import os
-import sys
-from pathlib import Path
 from typing import Any
 
 # Disable UCC to WAR allgather issue before NGC PyTorch 25.12 upgrade.
@@ -28,17 +26,19 @@ _runtime_environment_prepared = False
 _runtime_initialized = False
 
 
-def _add_trt_llm_dll_directory() -> None:
+def _add_trt_llm_dll_directory():
     import platform
 
-    if platform.system() == "Windows":
+    on_windows = platform.system() == 'Windows'
+    if on_windows:
         import sysconfig
+        from pathlib import Path
 
         os.add_dll_directory(
-            Path(sysconfig.get_paths()["purelib"]) / "tensorrt_llm" / "libs")
+            Path(sysconfig.get_paths()['purelib']) / 'tensorrt_llm' / 'libs')
 
 
-def _preload_python_lib() -> None:
+def _preload_python_lib():
     """
     Preload Python library.
 
@@ -54,27 +54,40 @@ def _preload_python_lib() -> None:
     can easily find the library.
     """
     import platform
-
-    if platform.system() == "Linux":
+    on_linux = platform.system() == 'Linux'
+    if on_linux:
         from ctypes import cdll
+        import sys
 
         v_major, v_minor, *_ = sys.version_info
-        pythonlib = f"libpython{v_major}.{v_minor}.so"
-        cdll.LoadLibrary(pythonlib + ".1.0")
+        pythonlib = f'libpython{v_major}.{v_minor}.so'
+        cdll.LoadLibrary(pythonlib + '.1.0')
         cdll.LoadLibrary(pythonlib)
 
 
-def _setup_vendored_triton_kernels() -> None:
-    """Ensure our vendored triton_kernels takes precedence over any existing installation."""
+import sys
+from pathlib import Path
+
+
+def _setup_vendored_triton_kernels():
+    """Ensure our vendored triton_kernels takes precedence over any existing installation.
+
+    Some environments bundle triton_kernels, which can conflict with our vendored version. This function:
+    1. Clears any pre-loaded triton_kernels from sys.modules
+    2. Temporarily adds our package root to sys.path
+    3. Imports triton_kernels (caching our version in sys.modules)
+    4. Removes the package root from sys.path
+    """
+    # Clear any pre-loaded triton_kernels from cache
     for mod in list(sys.modules.keys()):
-        if mod == "triton_kernels" or mod.startswith("triton_kernels."):
+        if mod == 'triton_kernels' or mod.startswith('triton_kernels.'):
             del sys.modules[mod]
 
     root = Path(__file__).parent.parent
-    vendored = root / "triton_kernels"
+    vendored = root / 'triton_kernels'
     if not vendored.exists():
         raise RuntimeError(
-            f"Vendored triton_kernels module not found at {vendored}")
+            f'Vendored triton_kernels module not found at {vendored}')
 
     should_add_to_path = str(root) not in sys.path
     if should_add_to_path:
@@ -91,6 +104,7 @@ def _prepare_runtime_environment() -> None:
     if _runtime_environment_prepared:
         return
 
+    # Preserve the old runtime setup sequence, but defer it until a real export is used.
     _add_trt_llm_dll_directory()
     _preload_python_lib()
     _setup_vendored_triton_kernels()
@@ -111,58 +125,58 @@ def _initialize_runtime() -> None:
 from .version import __version__
 
 __all__ = [
-    "AutoConfig",
-    "AutoModelForCausalLM",
-    "logger",
-    "str_dtype_to_trt",
-    "torch_dtype_to_trt",
-    "str_dtype_to_torch",
-    "default_gpus_per_node",
-    "local_mpi_rank",
-    "local_mpi_size",
-    "mpi_barrier",
-    "mpi_comm",
-    "mpi_rank",
-    "set_mpi_comm",
-    "mpi_world_size",
-    "constant",
-    "default_net",
-    "default_trtnet",
-    "precision",
-    "net_guard",
-    "torch_models",
-    "Network",
-    "Mapping",
-    "MnnvlMemory",
-    "MnnvlMoe",
-    "MoEAlltoallInfo",
-    "PluginBase",
-    "Builder",
-    "BuilderConfig",
-    "build",
-    "BuildConfig",
-    "Tensor",
-    "Parameter",
-    "runtime",
-    "Module",
-    "functional",
-    "models",
-    "quantization",
-    "tools",
-    "LLM",
-    "AsyncLLM",
-    "MultimodalEncoder",
-    "LlmArgs",
-    "TorchLlmArgs",
-    "TrtLlmArgs",
-    "SamplingParams",
-    "VisualGenArgs",
-    "DisaggregatedParams",
-    "KvCacheConfig",
-    "math_utils",
-    "VisualGen",
-    "VisualGenParams",
-    "__version__",
+    'AutoConfig',
+    'AutoModelForCausalLM',
+    'logger',
+    'str_dtype_to_trt',
+    'torch_dtype_to_trt',
+    'str_dtype_to_torch',
+    'default_gpus_per_node',
+    'local_mpi_rank',
+    'local_mpi_size',
+    'mpi_barrier',
+    'mpi_comm',
+    'mpi_rank',
+    'set_mpi_comm',
+    'mpi_world_size',
+    'constant',
+    'default_net',
+    'default_trtnet',
+    'precision',
+    'net_guard',
+    'torch_models',
+    'Network',
+    'Mapping',
+    'MnnvlMemory',
+    'MnnvlMoe',
+    'MoEAlltoallInfo',
+    'PluginBase',
+    'Builder',
+    'BuilderConfig',
+    'build',
+    'BuildConfig',
+    'Tensor',
+    'Parameter',
+    'runtime',
+    'Module',
+    'functional',
+    'models',
+    'quantization',
+    'tools',
+    'LLM',
+    'AsyncLLM',
+    'MultimodalEncoder',
+    'LlmArgs',
+    'TorchLlmArgs',
+    'TrtLlmArgs',
+    'SamplingParams',
+    'VisualGenArgs',
+    'DisaggregatedParams',
+    'KvCacheConfig',
+    'math_utils',
+    'VisualGen',
+    'VisualGenParams',
+    '__version__',
 ]
 
 _LAZY_EXPORTS = {
