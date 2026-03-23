@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import gc
 import json
@@ -6,14 +8,14 @@ import signal
 import socket
 import subprocess  # nosec B404
 import sys
+from enum import StrEnum
+from functools import cache
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 import click
-import torch
 import yaml
-from strenum import StrEnum
-from torch.cuda import device_count
 
 from trtllm_cli._serve_metadata import (
     add_disaggregated_mpi_worker_options,
@@ -21,32 +23,128 @@ from trtllm_cli._serve_metadata import (
     add_mm_embedding_serve_options,
     add_serve_options,
 )
-from tensorrt_llm import LLM as PyTorchLLM
-from tensorrt_llm import MultimodalEncoder
-from tensorrt_llm._tensorrt_engine import LLM
-from tensorrt_llm._torch.visual_gen.config import VisualGenArgs
-from tensorrt_llm._utils import mpi_rank
-from tensorrt_llm.commands.utils import get_is_diffusion_model
-from tensorrt_llm.executor.utils import LlmLauncherEnvs
-from tensorrt_llm.inputs.multimodal import MultimodalServerConfig
-from tensorrt_llm.llmapi import (BuildConfig, CapacitySchedulerPolicy,
-                                 DynamicBatchConfig, KvCacheConfig,
-                                 SchedulerConfig, VisualGen)
-from tensorrt_llm.llmapi.disagg_utils import (DisaggClusterConfig,
-                                              MetadataServerConfig, ServerRole,
-                                              extract_disagg_cluster_config,
-                                              parse_disagg_config_file,
-                                              parse_metadata_server_config_file)
-from tensorrt_llm.llmapi.llm_args import TorchLlmArgs, TrtLlmArgs
-from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_dict
-from tensorrt_llm.llmapi.mpi_session import find_free_ipc_addr
-from tensorrt_llm.logger import logger
-from tensorrt_llm.mapping import CpType
-from tensorrt_llm.serve import OpenAIDisaggServer, OpenAIServer
-from tensorrt_llm.tools.importlib_utils import import_custom_module_from_dir
+from trtllm_cli._help import (HelpPassthroughArgument,
+                              HelpPassthroughOption)
 
 # Global variable to store the Popen object of the child process
 _child_p_global: Optional[subprocess.Popen] = None
+
+
+@cache
+def _runtime() -> SimpleNamespace:
+    import torch as torch_module
+    from torch.cuda import device_count as torch_device_count
+
+    from tensorrt_llm import LLM as PyTorchLLM, MultimodalEncoder
+    from tensorrt_llm._tensorrt_engine import LLM
+    from tensorrt_llm._torch.visual_gen.config import VisualGenArgs
+    from tensorrt_llm._utils import mpi_rank
+    from tensorrt_llm.commands.utils import get_is_diffusion_model
+    from tensorrt_llm.executor.utils import LlmLauncherEnvs
+    from tensorrt_llm.inputs.multimodal import MultimodalServerConfig
+    from tensorrt_llm.llmapi import (BuildConfig, CapacitySchedulerPolicy,
+                                     DynamicBatchConfig, KvCacheConfig,
+                                     SchedulerConfig, VisualGen)
+    from tensorrt_llm.llmapi.disagg_utils import (
+        DisaggClusterConfig, MetadataServerConfig, ServerRole,
+        extract_disagg_cluster_config, parse_disagg_config_file,
+        parse_metadata_server_config_file)
+    from tensorrt_llm.llmapi.llm_args import TorchLlmArgs, TrtLlmArgs
+    from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_dict
+    from tensorrt_llm.llmapi.mpi_session import find_free_ipc_addr
+    from tensorrt_llm.logger import logger
+    from tensorrt_llm.mapping import CpType
+    from tensorrt_llm.serve import OpenAIDisaggServer, OpenAIServer
+    from tensorrt_llm.tools.importlib_utils import import_custom_module_from_dir
+
+    return SimpleNamespace(
+        torch=torch_module,
+        device_count=torch_device_count,
+        PyTorchLLM=PyTorchLLM,
+        MultimodalEncoder=MultimodalEncoder,
+        LLM=LLM,
+        VisualGenArgs=VisualGenArgs,
+        mpi_rank=mpi_rank,
+        get_is_diffusion_model=get_is_diffusion_model,
+        LlmLauncherEnvs=LlmLauncherEnvs,
+        MultimodalServerConfig=MultimodalServerConfig,
+        BuildConfig=BuildConfig,
+        CapacitySchedulerPolicy=CapacitySchedulerPolicy,
+        DynamicBatchConfig=DynamicBatchConfig,
+        KvCacheConfig=KvCacheConfig,
+        SchedulerConfig=SchedulerConfig,
+        VisualGen=VisualGen,
+        DisaggClusterConfig=DisaggClusterConfig,
+        MetadataServerConfig=MetadataServerConfig,
+        ServerRole=ServerRole,
+        extract_disagg_cluster_config=extract_disagg_cluster_config,
+        parse_disagg_config_file=parse_disagg_config_file,
+        parse_metadata_server_config_file=parse_metadata_server_config_file,
+        TorchLlmArgs=TorchLlmArgs,
+        TrtLlmArgs=TrtLlmArgs,
+        update_llm_args_with_extra_dict=update_llm_args_with_extra_dict,
+        find_free_ipc_addr=find_free_ipc_addr,
+        logger=logger,
+        CpType=CpType,
+        OpenAIDisaggServer=OpenAIDisaggServer,
+        OpenAIServer=OpenAIServer,
+        import_custom_module_from_dir=import_custom_module_from_dir,
+    )
+
+
+class _AttrProxy:
+
+    def __init__(self, name: str):
+        self._name = name
+
+    def _target(self):
+        return getattr(_runtime(), self._name)
+
+    def __call__(self, *args, **kwargs):
+        return self._target()(*args, **kwargs)
+
+    def __getattr__(self, attr):
+        return getattr(self._target(), attr)
+
+    def __getitem__(self, key):
+        return self._target()[key]
+
+    def __iter__(self):
+        return iter(self._target())
+
+
+torch = _AttrProxy("torch")
+device_count = _AttrProxy("device_count")
+PyTorchLLM = _AttrProxy("PyTorchLLM")
+MultimodalEncoder = _AttrProxy("MultimodalEncoder")
+LLM = _AttrProxy("LLM")
+VisualGenArgs = _AttrProxy("VisualGenArgs")
+mpi_rank = _AttrProxy("mpi_rank")
+get_is_diffusion_model = _AttrProxy("get_is_diffusion_model")
+LlmLauncherEnvs = _AttrProxy("LlmLauncherEnvs")
+MultimodalServerConfig = _AttrProxy("MultimodalServerConfig")
+BuildConfig = _AttrProxy("BuildConfig")
+CapacitySchedulerPolicy = _AttrProxy("CapacitySchedulerPolicy")
+DynamicBatchConfig = _AttrProxy("DynamicBatchConfig")
+KvCacheConfig = _AttrProxy("KvCacheConfig")
+SchedulerConfig = _AttrProxy("SchedulerConfig")
+VisualGen = _AttrProxy("VisualGen")
+DisaggClusterConfig = _AttrProxy("DisaggClusterConfig")
+MetadataServerConfig = _AttrProxy("MetadataServerConfig")
+ServerRole = _AttrProxy("ServerRole")
+extract_disagg_cluster_config = _AttrProxy("extract_disagg_cluster_config")
+parse_disagg_config_file = _AttrProxy("parse_disagg_config_file")
+parse_metadata_server_config_file = _AttrProxy(
+    "parse_metadata_server_config_file")
+TorchLlmArgs = _AttrProxy("TorchLlmArgs")
+TrtLlmArgs = _AttrProxy("TrtLlmArgs")
+update_llm_args_with_extra_dict = _AttrProxy("update_llm_args_with_extra_dict")
+find_free_ipc_addr = _AttrProxy("find_free_ipc_addr")
+logger = _AttrProxy("logger")
+CpType = _AttrProxy("CpType")
+OpenAIDisaggServer = _AttrProxy("OpenAIDisaggServer")
+OpenAIServer = _AttrProxy("OpenAIServer")
+import_custom_module_from_dir = _AttrProxy("import_custom_module_from_dir")
 
 
 def _signal_handler_cleanup_child(signum, frame):
@@ -129,13 +227,10 @@ def get_llm_args(
         tokenizer: Optional[str] = None,
         custom_tokenizer: Optional[str] = None,
         backend: str = "pytorch",
-        max_beam_width: int = BuildConfig.model_fields["max_beam_width"].
-    default,
-        max_batch_size: int = BuildConfig.model_fields["max_batch_size"].
-    default,
-        max_num_tokens: int = BuildConfig.model_fields["max_num_tokens"].
-    default,
-        max_seq_len: int = BuildConfig.model_fields["max_seq_len"].default,
+        max_beam_width: Optional[int] = None,
+        max_batch_size: Optional[int] = None,
+        max_num_tokens: Optional[int] = None,
+        max_seq_len: Optional[int] = None,
         tensor_parallel_size: int = 1,
         pipeline_parallel_size: int = 1,
         context_parallel_size: int = 1,
@@ -154,6 +249,15 @@ def get_llm_args(
         enable_attention_dp: bool = False,
         video_pruning_rate: Optional[float] = None,
         **llm_args_extra_dict: Any):
+    build_defaults = BuildConfig.model_fields
+    if max_beam_width is None:
+        max_beam_width = build_defaults["max_beam_width"].default
+    if max_batch_size is None:
+        max_batch_size = build_defaults["max_batch_size"].default
+    if max_num_tokens is None:
+        max_num_tokens = build_defaults["max_num_tokens"].default
+    if max_seq_len is None:
+        max_seq_len = build_defaults["max_seq_len"].default
 
     if gpus_per_node is None:
         gpus_per_node = device_count()
@@ -491,7 +595,9 @@ def launch_visual_gen_server(
 
 
 @click.command("serve")
-@add_serve_options(model_required=True)
+@add_serve_options(model_required=True,
+                   option_cls=HelpPassthroughOption,
+                   argument_cls=HelpPassthroughArgument)
 def serve(
         model: str, tokenizer: Optional[str], custom_tokenizer: Optional[str],
         host: str, port: int, log_level: str, backend: str, max_beam_width: int,
@@ -664,7 +770,9 @@ def serve(
 
 
 @click.command("mm_embedding_serve")
-@add_mm_embedding_serve_options(model_required=True)
+@add_mm_embedding_serve_options(model_required=True,
+                                option_cls=HelpPassthroughOption,
+                                argument_cls=HelpPassthroughArgument)
 def serve_encoder(model: str, host: str, port: int, log_level: str,
                   max_batch_size: int, max_num_tokens: int,
                   gpus_per_node: Optional[int], trust_remote_code: bool,
@@ -705,7 +813,7 @@ def serve_encoder(model: str, host: str, port: int, log_level: str,
 
 
 @click.command("disaggregated")
-@add_disaggregated_options()
+@add_disaggregated_options(option_cls=HelpPassthroughOption)
 def disaggregated(
     config_file: Optional[str],
     metadata_server_config_file: Optional[str],
@@ -777,7 +885,7 @@ def set_cuda_device():
 
 
 @click.command("disaggregated_mpi_worker")
-@add_disaggregated_mpi_worker_options()
+@add_disaggregated_mpi_worker_options(option_cls=HelpPassthroughOption)
 def disaggregated_mpi_worker(config_file: Optional[str], log_level: str):
     """Launching disaggregated MPI worker"""
 
@@ -977,13 +1085,53 @@ def _launch_disaggregated_leader(sub_comm, instance_idx: int, config_file: str,
 
 
 class DefaultGroup(click.Group):
-    """Custom Click group to allow default command behavior"""
+    """Click group that preserves trtllm-serve's default serve subcommand."""
+
+    def _resolve_default_command(self, ctx, args):
+        if args and args[0] not in self.commands and not args[0].startswith("-"):
+            return "serve", self.commands["serve"], args
+        return None
 
     def resolve_command(self, ctx, args):
-        # If the first argument is not a recognized subcommand, assume "serve"
-        if args and args[0] not in self.commands:
-            return "serve", self.commands["serve"], args
+        default_command = self._resolve_default_command(ctx, args)
+        if default_command is not None:
+            return default_command
         return super().resolve_command(ctx, args)
+
+    def invoke(self, ctx):
+        def _process_result(value):
+            if self._result_callback is not None:
+                value = ctx.invoke(self._result_callback, value, **ctx.params)
+            return value
+
+        protected_args = getattr(ctx, "_protected_args", ctx.protected_args)
+        if not protected_args:
+            return super().invoke(ctx)
+
+        args = [*protected_args, *ctx.args]
+        ctx.args = []
+        if hasattr(ctx, "_protected_args"):
+            ctx._protected_args = []
+        else:
+            ctx.protected_args = []
+
+        with ctx:
+            default_command = self._resolve_default_command(ctx, args)
+            if default_command is None:
+                cmd_name, cmd, args = super().resolve_command(ctx, args)
+                ctx.invoked_subcommand = cmd_name
+                click.Command.invoke(self, ctx)
+                sub_ctx = cmd.make_context(cmd_name, args, parent=ctx)
+            else:
+                cmd_name, cmd, args = default_command
+                ctx.invoked_subcommand = cmd_name
+                click.Command.invoke(self, ctx)
+                sub_ctx = cmd.make_context(ctx.info_name,
+                                           args,
+                                           parent=ctx.parent)
+
+            with sub_ctx:
+                return _process_result(sub_ctx.command.invoke(sub_ctx))
 
 
 main = DefaultGroup(

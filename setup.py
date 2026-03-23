@@ -419,9 +419,9 @@ setup(
             'trtllm-build=tensorrt_llm.commands.build:main',
             'trtllm-prune=tensorrt_llm.commands.prune:main',
             'trtllm-refit=tensorrt_llm.commands.refit:main',
-            'trtllm-bench=trtllm_cli.main:bench_entry',
-            'trtllm-serve=trtllm_cli.main:serve_entry',
-            'trtllm-eval=trtllm_cli.main:eval_entry'
+            'trtllm-bench=tensorrt_llm.commands.bench:main',
+            'trtllm-serve=tensorrt_llm.commands.serve:main',
+            'trtllm-eval=tensorrt_llm.commands.eval:main'
         ],
     },
     scripts=['tensorrt_llm/llmapi/trtllm-llmapi-launch'],

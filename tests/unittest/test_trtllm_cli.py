@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import ast
+import importlib
 import sys
 from pathlib import Path
 
@@ -21,19 +22,16 @@ from click.testing import CliRunner
 import pytest
 
 import trtllm_cli.main as main_cli
-from trtllm_cli import bench, eval as eval_cli, serve
-from trtllm_cli._dispatch import invocation_state
 from trtllm_cli._serve_metadata import (LOG_LEVELS, REASONING_PARSER_CHOICES,
                                         TOOL_PARSER_CHOICES)
 from trtllm_cli.main import cli as root_cli
 
 
-def _new_tensorrt_llm_modules(baseline: set[str]) -> set[str]:
-    return {
-        name
-        for name in set(sys.modules) - baseline
-        if name == "tensorrt_llm" or name.startswith("tensorrt_llm.")
-    }
+def _purge_modules(*prefixes: str) -> None:
+    for name in list(sys.modules):
+        if any(name == prefix or name.startswith(f"{prefix}.")
+               for prefix in prefixes):
+            sys.modules.pop(name, None)
 
 
 def _repo_root() -> Path:
@@ -74,7 +72,8 @@ def _extract_class_attribute_node(relative_path: str, class_name: str,
                 if class_node.target.id == name:
                     return class_node.value
     raise AssertionError(
-        f"Could not find class attribute {class_name}.{name} in {relative_path}")
+        f"Could not find class attribute {class_name}.{name} in {relative_path}"
+    )
 
 
 def _dict_string_keys(node: ast.AST) -> tuple[str, ...]:
@@ -107,29 +106,41 @@ def _extract_reasoning_parser_keys(relative_path: str) -> tuple[str, ...]:
     return tuple(keys)
 
 
-def test_root_help_lists_available_commands_without_importing_runtime():
+def test_import_tensorrt_llm_is_lazy(capsys):
+    _purge_modules("tensorrt_llm", "torch", "triton_kernels")
+
+    module = importlib.import_module("tensorrt_llm")
+
+    captured = capsys.readouterr()
+    assert module.__version__
+    assert captured.out == ""
+    assert "torch" not in sys.modules
+    assert "tensorrt_llm._common" not in sys.modules
+    assert not any(name == "triton_kernels"
+                   or name.startswith("triton_kernels.")
+                   for name in sys.modules)
+
+
+def test_root_help_lists_commands_without_importing_tensorrt_llm():
     runner = CliRunner()
-    baseline = set(sys.modules)
+    _purge_modules("tensorrt_llm", "torch")
 
     result = runner.invoke(root_cli, ["--help"])
 
     assert result.exit_code == 0, result.output
-    assert "[TensorRT-LLM]" not in result.output
     assert "serve" in result.output
     assert "bench" in result.output
     assert "eval" in result.output
     assert "build" in result.output
     assert "prune" in result.output
     assert "refit" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
+    assert "tensorrt_llm" not in sys.modules
+    assert "torch" not in sys.modules
 
 
-def test_root_serve_help_is_lightweight(monkeypatch):
+def test_root_serve_help_is_lazy():
     runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
+    _purge_modules("tensorrt_llm", "torch", "tensorrt", "triton_kernels")
 
     result = runner.invoke(root_cli, ["serve", "--help"])
 
@@ -137,514 +148,97 @@ def test_root_serve_help_is_lightweight(monkeypatch):
     assert "[TensorRT-LLM]" not in result.output
     assert "disaggregated" in result.output
     assert "mm_embedding_serve" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
+    assert "torch" not in sys.modules
+    assert "tensorrt_llm._common" not in sys.modules
 
 
-def test_root_serve_default_command_help_is_lightweight(monkeypatch):
+def test_root_serve_default_command_help_is_lazy():
     runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
+    _purge_modules("tensorrt_llm", "torch", "tensorrt", "triton_kernels")
 
-    with invocation_state(["serve", "dummy-model", "--help"],
-                          prog_name="trtllm",
-                          root_mode=True):
-        result = runner.invoke(root_cli, ["serve", "dummy-model", "--help"])
-
-    assert result.exit_code == 0, result.output
-    assert "Running an OpenAI API compatible server" in result.output
-    assert "--backend [pytorch|tensorrt|_autodeploy]" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_serve_default_command_help_is_lightweight(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    with invocation_state(["dummy-model", "--help"],
-                          prog_name="trtllm-serve",
-                          root_mode=False):
-        result = runner.invoke(serve.cli,
-                               ["dummy-model", "--help"],
-                               prog_name="trtllm-serve")
-
-    assert result.exit_code == 0, result.output
-    assert "Running an OpenAI API compatible server" in result.output
-    assert "--backend [pytorch|tensorrt|_autodeploy]" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_root_explicit_serve_subcommand_help_collapses_usage(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    with invocation_state(["serve", "serve", "--help"],
-                          prog_name="trtllm",
-                          root_mode=True):
-        result = runner.invoke(root_cli,
-                               ["serve", "serve", "--help"],
-                               prog_name="trtllm")
+    result = runner.invoke(root_cli, ["serve", "dummy-model", "--help"])
 
     assert result.exit_code == 0, result.output
     assert "Usage: trtllm serve [OPTIONS] MODEL" in result.output
-    assert "Usage: trtllm serve serve" not in result.output
-    assert "Additional arguments are forwarded" not in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
+    assert "--backend [pytorch|tensorrt|_autodeploy]" in result.output
+    assert "[TensorRT-LLM]" not in result.output
+    assert "torch" not in sys.modules
+    assert "tensorrt_llm._common" not in sys.modules
 
 
-def test_explicit_serve_subcommand_help_collapses_usage(monkeypatch):
+def test_standalone_serve_default_command_help_is_lazy():
     runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
+    _purge_modules("tensorrt_llm", "torch", "tensorrt", "triton_kernels")
 
-    with invocation_state(["serve", "--help"],
-                          prog_name="trtllm-serve",
-                          root_mode=False):
-        result = runner.invoke(serve.cli,
-                               ["serve", "--help"],
-                               prog_name="trtllm-serve")
+    serve_mod = importlib.import_module("tensorrt_llm.commands.serve")
+    result = runner.invoke(serve_mod.main,
+                           ["dummy-model", "--help"],
+                           prog_name="trtllm-serve")
 
     assert result.exit_code == 0, result.output
     assert "Usage: trtllm-serve [OPTIONS] MODEL" in result.output
-    assert "Usage: trtllm-serve serve" not in result.output
-    assert "Additional arguments are forwarded" not in result.output
-    assert "--reasoning_parser [deepseek-r1|qwen3|nano-v3]" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_serve_help_skips_option_validation(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    with invocation_state([
-            "serve",
-            "--backend",
-            "not-a-backend",
-            "--custom_module_dirs",
-            "/does/not/exist",
-            "--help",
-    ],
-                          prog_name="trtllm-serve",
-                          root_mode=False):
-        result = runner.invoke(
-            serve.cli,
-            [
-                "serve",
-                "--backend",
-                "not-a-backend",
-                "--custom_module_dirs",
-                "/does/not/exist",
-                "--help",
-            ],
-            prog_name="trtllm-serve",
-        )
-
-    assert result.exit_code == 0, result.output
     assert "--backend [pytorch|tensorrt|_autodeploy]" in result.output
-    assert "--custom_module_dirs PATH" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_mm_embedding_serve_help_is_rich(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    with invocation_state(["mm_embedding_serve", "--help"],
-                          prog_name="trtllm-serve",
-                          root_mode=False):
-        result = runner.invoke(serve.cli,
-                               ["mm_embedding_serve", "--help"],
-                               prog_name="trtllm-serve")
-
-    assert result.exit_code == 0, result.output
-    assert "Running an OpenAI API compatible server" in result.output
-    assert "--tensor_parallel_size" in result.output
-    assert "Additional arguments are forwarded" not in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_disaggregated_help_is_rich(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    with invocation_state(["disaggregated", "--help"],
-                          prog_name="trtllm-serve",
-                          root_mode=False):
-        result = runner.invoke(serve.cli,
-                               ["disaggregated", "--help"],
-                               prog_name="trtllm-serve")
-
-    assert result.exit_code == 0, result.output
-    assert "Running server in disaggregated mode" in result.output
-    assert "--server_start_timeout INTEGER" in result.output
-    assert "Additional arguments are forwarded" not in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_bench_help_is_lightweight(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(bench, "_delegate_to_legacy_bench",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(bench.cli, ["--help"])
-
-    assert result.exit_code == 0, result.output
     assert "[TensorRT-LLM]" not in result.output
+    assert "torch" not in sys.modules
+    assert "tensorrt_llm._common" not in sys.modules
+
+
+def test_root_bench_help_is_lazy():
+    runner = CliRunner()
+    _purge_modules("tensorrt_llm", "torch", "tensorrt", "triton_kernels")
+
+    result = runner.invoke(root_cli, ["bench", "--help"])
+
+    assert result.exit_code == 0, result.output
     assert "throughput" in result.output
     assert "prepare-dataset" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_root_bench_subcommand_help_is_lightweight(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(bench, "_delegate_to_legacy_bench",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    with invocation_state(["bench", "throughput", "--help"],
-                          prog_name="trtllm",
-                          root_mode=True):
-        result = runner.invoke(root_cli, ["bench", "throughput", "--help"])
-
-    assert result.exit_code == 0, result.output
-    assert "Run throughput benchmarking." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_bench_subcommand_help_is_lightweight(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(bench, "_delegate_to_legacy_bench",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(bench.cli,
-                           ["throughput", "--help"],
-                           prog_name="trtllm-bench")
-
-    assert result.exit_code == 0, result.output
-    assert "Run throughput benchmarking." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_eval_help_is_lightweight(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(eval_cli, "_delegate_to_legacy_eval",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(eval_cli.cli, ["--help"])
-
-    assert result.exit_code == 0, result.output
     assert "[TensorRT-LLM]" not in result.output
+    assert "torch" not in sys.modules
+
+
+def test_root_eval_help_is_lazy():
+    runner = CliRunner()
+    _purge_modules("tensorrt_llm", "torch", "tensorrt", "triton_kernels")
+
+    result = runner.invoke(root_cli, ["eval", "--help"])
+
+    assert result.exit_code == 0, result.output
     assert "mmlu" in result.output
     assert "longbench_v2" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
+    assert "[TensorRT-LLM]" not in result.output
+    assert "torch" not in sys.modules
 
 
-def test_root_eval_subcommand_help_is_lightweight(monkeypatch):
+@pytest.mark.parametrize("command_name", ["serve", "bench", "eval"])
+def test_root_click_proxies_delegate_with_expected_prog_name(monkeypatch,
+                                                             command_name):
     runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(eval_cli, "_delegate_to_legacy_eval",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
+    calls = []
+    monkeypatch.setattr(main_cli, "_run_click_command",
+                        lambda module_path, *, prog_name, args: calls.append(
+                            (module_path, prog_name, args)))
 
-    with invocation_state(["eval", "mmlu", "--help"],
-                          prog_name="trtllm",
-                          root_mode=True):
-        result = runner.invoke(root_cli, ["eval", "mmlu", "--help"])
+    result = runner.invoke(root_cli, [command_name, "arg1", "--flag"])
 
     assert result.exit_code == 0, result.output
-    assert "Evaluate on MMLU." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_eval_subcommand_help_is_lightweight(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(eval_cli, "_delegate_to_legacy_eval",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(eval_cli.cli,
-                           ["mmlu", "--help"],
-                           prog_name="trtllm-eval")
-
-    assert result.exit_code == 0, result.output
-    assert "Evaluate on MMLU." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
+    assert calls == [(f"tensorrt_llm.commands.{command_name}",
+                      f"trtllm {command_name}", ("arg1", "--flag"))]
 
 
 @pytest.mark.parametrize("command_name", ["build", "prune", "refit"])
-@pytest.mark.parametrize("help_flag", ["--help", "-h"])
-def test_root_argparse_help_delegates_without_importing_runtime(
-        monkeypatch, command_name, help_flag):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    calls = []
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: calls.append((args, kwargs)))
-
-    result = runner.invoke(root_cli, [command_name, help_flag])
-
-    assert result.exit_code == 0, result.output
-    assert calls == [(
-        (f"tensorrt_llm.commands.{command_name}", "main"),
-        {
-            "top_level_command": command_name,
-            "standalone_prog_name": f"trtllm-{command_name}",
-        },
-    )]
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-@pytest.mark.parametrize(
-    ("command_name", "args"),
-    [
-        ("build", ["--checkpoint_dir", "dummy-checkpoint"]),
-        ("prune", ["--checkpoint_dir", "dummy-checkpoint"]),
-        ("refit", [
-            "--engine_dir",
-            "dummy-engine",
-            "--checkpoint_dir",
-            "dummy-checkpoint",
-            "--output_dir",
-            "dummy-output",
-        ]),
-    ],
-)
-def test_root_argparse_command_delegates_raw_args_without_importing_runtime(
-        monkeypatch, command_name, args):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    calls = []
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *delegate_args, **kwargs: calls.append(
-                            (delegate_args, kwargs)))
-
-    result = runner.invoke(root_cli, [command_name, *args])
-
-    assert result.exit_code == 0, result.output
-    assert calls == [(
-        (f"tensorrt_llm.commands.{command_name}", "main"),
-        {
-            "top_level_command": command_name,
-            "standalone_prog_name": f"trtllm-{command_name}",
-        },
-    )]
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_eval_invalid_config_fails_before_delegate(monkeypatch, tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    bad_config = tmp_path / "bad.yaml"
-    bad_config.write_text("foo: [\n", encoding="utf-8")
-    monkeypatch.setattr(eval_cli, "_delegate_to_legacy_eval",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(eval_cli.cli, [
-        "--model",
-        "dummy-model",
-        "--config",
-        str(bad_config),
-        "mmlu",
-    ],
-                           prog_name="trtllm-eval")
-
-    assert result.exit_code == 2, result.output
-    assert "Invalid value for --config" in result.output
-    assert "Invalid YAML" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_eval_help_skips_invalid_config_validation(monkeypatch, tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    bad_config = tmp_path / "bad.yaml"
-    bad_config.write_text("foo: [\n", encoding="utf-8")
-    monkeypatch.setattr(eval_cli, "_delegate_to_legacy_eval",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    with invocation_state([
-            "--model",
-            "dummy-model",
-            "--config",
-            str(bad_config),
-            "mmlu",
-            "--help",
-    ],
-                          prog_name="trtllm-eval",
-                          root_mode=False):
-        result = runner.invoke(eval_cli.cli, [
-            "--model",
-            "dummy-model",
-            "--config",
-            str(bad_config),
-            "mmlu",
-            "--help",
-        ],
-                               prog_name="trtllm-eval")
-
-    assert result.exit_code == 0, result.output
-    assert "Evaluate on MMLU." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_serve_invalid_config_fails_before_delegate(monkeypatch, tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    bad_config = tmp_path / "bad.yaml"
-    bad_config.write_text("foo: [\n", encoding="utf-8")
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(serve.cli, [
-        "dummy-model",
-        "--config",
-        str(bad_config),
-    ],
-                           prog_name="trtllm-serve")
-
-    assert result.exit_code == 2, result.output
-    assert "Usage: trtllm-serve [OPTIONS] MODEL" in result.output
-    assert "Usage: trtllm-serve serve" not in result.output
-    assert "Invalid value for --config" in result.output
-    assert "Invalid YAML" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_serve_invalid_media_io_kwargs_fails_before_delegate(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(serve.cli, [
-        "dummy-model",
-        "--media_io_kwargs",
-        "{invalid-json",
-    ],
-                           prog_name="trtllm-serve")
-
-    assert result.exit_code == 2, result.output
-    assert "Usage: trtllm-serve [OPTIONS] MODEL" in result.output
-    assert "Usage: trtllm-serve serve" not in result.output
-    assert "Invalid value for --media_io_kwargs" in result.output
-    assert "Invalid JSON" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_disaggregated_invalid_config_fails_before_delegate(monkeypatch,
-                                                            tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    bad_config = tmp_path / "bad.yaml"
-    bad_config.write_text("foo: [\n", encoding="utf-8")
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(serve.cli, [
-        "disaggregated",
-        "--config",
-        str(bad_config),
-    ],
-                           prog_name="trtllm-serve")
-
-    assert result.exit_code == 2, result.output
-    assert "Invalid value for --config" in result.output
-    assert "Invalid YAML" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_root_serve_default_command_delegates(monkeypatch):
+def test_root_argparse_proxies_delegate_with_expected_prog_name(
+        monkeypatch, command_name):
     runner = CliRunner()
     calls = []
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: calls.append("serve"))
+    monkeypatch.setattr(main_cli, "_run_argparse_command",
+                        lambda module_path, *, prog_name, args: calls.append(
+                            (module_path, prog_name, args)))
 
-    result = runner.invoke(root_cli,
-                           ["serve", "dummy-model", "--port", "8000"])
-
-    assert result.exit_code == 0, result.output
-    assert calls == ["serve"]
-
-
-def test_root_serve_implicit_default_validation_usage_is_collapsed(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
-                        lambda: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(root_cli, [
-        "serve",
-        "dummy-model",
-        "--media_io_kwargs",
-        "{invalid-json",
-    ],
-                           prog_name="trtllm")
-
-    assert result.exit_code == 2, result.output
-    assert "Usage: trtllm serve [OPTIONS] MODEL" in result.output
-    assert "Usage: trtllm serve serve" not in result.output
-    assert "Invalid value for --media_io_kwargs" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_root_bench_command_delegates(monkeypatch):
-    runner = CliRunner()
-    calls = []
-    monkeypatch.setattr(bench, "_delegate_to_legacy_bench",
-                        lambda: calls.append("bench"))
-
-    result = runner.invoke(root_cli,
-                           ["bench", "--model", "dummy-model", "throughput"])
+    result = runner.invoke(root_cli, [command_name, "--help"])
 
     assert result.exit_code == 0, result.output
-    assert calls == ["bench"]
-
-
-def test_bench_model_requirement_is_restored_after_help(monkeypatch):
-    runner = CliRunner()
-    monkeypatch.setattr(bench, "_delegate_to_legacy_bench", lambda: None)
-
-    help_result = runner.invoke(bench.cli,
-                                ["throughput", "--help"],
-                                prog_name="trtllm-bench")
-    missing_model_result = runner.invoke(bench.cli, ["throughput"])
-
-    assert help_result.exit_code == 0, help_result.output
-    assert "Run throughput benchmarking." in help_result.output
-    assert missing_model_result.exit_code == 2
-    assert "Missing option '--model' / '-m'." in missing_model_result.output
+    assert calls == [(f"tensorrt_llm.commands.{command_name}",
+                      f"trtllm {command_name}", ("--help", ))]
 
 
 def test_serve_metadata_reasoning_parser_choices_match_runtime_source():

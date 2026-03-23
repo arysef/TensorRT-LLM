@@ -13,26 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from __future__ import annotations
+
+import importlib
 import os
+import sys
+from pathlib import Path
+from typing import Any
 
 # Disable UCC to WAR allgather issue before NGC PyTorch 25.12 upgrade.
 os.environ["OMPI_MCA_coll_ucc_enable"] = "0"
 
+_runtime_environment_prepared = False
+_runtime_initialized = False
 
-def _add_trt_llm_dll_directory():
+
+def _add_trt_llm_dll_directory() -> None:
     import platform
-    on_windows = platform.system() == "Windows"
-    if on_windows:
+
+    if platform.system() == "Windows":
         import sysconfig
-        from pathlib import Path
+
         os.add_dll_directory(
-            Path(sysconfig.get_paths()['purelib']) / "tensorrt_llm" / "libs")
+            Path(sysconfig.get_paths()["purelib"]) / "tensorrt_llm" / "libs")
 
 
-_add_trt_llm_dll_directory()
-
-
-def _preload_python_lib():
+def _preload_python_lib() -> None:
     """
     Preload Python library.
 
@@ -48,40 +54,23 @@ def _preload_python_lib():
     can easily find the library.
     """
     import platform
-    on_linux = platform.system() == "Linux"
-    if on_linux:
-        import sys
+
+    if platform.system() == "Linux":
         from ctypes import cdll
+
         v_major, v_minor, *_ = sys.version_info
-        pythonlib = f'libpython{v_major}.{v_minor}.so'
-        _ = cdll.LoadLibrary(pythonlib + '.1.0')
-        _ = cdll.LoadLibrary(pythonlib)
+        pythonlib = f"libpython{v_major}.{v_minor}.so"
+        cdll.LoadLibrary(pythonlib + ".1.0")
+        cdll.LoadLibrary(pythonlib)
 
 
-_preload_python_lib()
-
-import sys
-from pathlib import Path
-
-
-def _setup_vendored_triton_kernels():
-    """Ensure our vendored triton_kernels takes precedence over any existing installation.
-
-    Some environments bundle triton_kernels, which can conflict with our vendored version. This function:
-    1. Clears any pre-loaded triton_kernels from sys.modules
-    2. Temporarily adds our package root to sys.path
-    3. Imports triton_kernels (caching our version in sys.modules)
-    4. Removes the package root from sys.path
-    """
-
-    # Clear any pre-loaded triton_kernels from cache
+def _setup_vendored_triton_kernels() -> None:
+    """Ensure our vendored triton_kernels takes precedence over any existing installation."""
     for mod in list(sys.modules.keys()):
         if mod == "triton_kernels" or mod.startswith("triton_kernels."):
             del sys.modules[mod]
 
-    # Temporarily add our package root to sys.path
     root = Path(__file__).parent.parent
-
     vendored = root / "triton_kernels"
     if not vendored.exists():
         raise RuntimeError(
@@ -97,100 +86,165 @@ def _setup_vendored_triton_kernels():
         sys.path.remove(str(root))
 
 
-_setup_vendored_triton_kernels()
+def _prepare_runtime_environment() -> None:
+    global _runtime_environment_prepared
+    if _runtime_environment_prepared:
+        return
 
-# Need to import torch before tensorrt_llm library, otherwise some shared binary files
-# cannot be found for the public PyTorch, raising errors like:
-# ImportError: libc10.so: cannot open shared object file: No such file or directory
-import torch  # noqa
+    _add_trt_llm_dll_directory()
+    _preload_python_lib()
+    _setup_vendored_triton_kernels()
+    _runtime_environment_prepared = True
 
-import tensorrt_llm._torch.models as torch_models
-import tensorrt_llm.functional as functional
-import tensorrt_llm.math_utils as math_utils
-import tensorrt_llm.models as models
-import tensorrt_llm.quantization as quantization
-import tensorrt_llm.runtime as runtime
-import tensorrt_llm.tools as tools
 
-from ._common import _init, default_net, default_trtnet, precision
-from ._mnnvl_utils import MnnvlMemory, MnnvlMoe, MoEAlltoallInfo
-from ._torch.visual_gen.config import VisualGenArgs
-from ._utils import (default_gpus_per_node, local_mpi_rank, local_mpi_size,
-                     mpi_barrier, mpi_comm, mpi_rank, mpi_world_size,
-                     set_mpi_comm, str_dtype_to_torch, str_dtype_to_trt,
-                     torch_dtype_to_trt)
-from .builder import BuildConfig, Builder, BuilderConfig, build
-from .disaggregated_params import DisaggregatedParams
-from .functional import Tensor, constant
-from .llmapi import LLM, AsyncLLM, MultimodalEncoder, VisualGen, VisualGenParams
-from .llmapi.llm_args import LlmArgs, TorchLlmArgs, TrtLlmArgs
-from .logger import logger
-from .mapping import Mapping
-from .models.automodel import AutoConfig, AutoModelForCausalLM
-from .module import Module
-from .network import Network, net_guard
-from .parameter import Parameter
-from .python_plugin import PluginBase
-from .sampling_params import SamplingParams
+def _initialize_runtime() -> None:
+    global _runtime_initialized
+    if _runtime_initialized:
+        return
+
+    from ._common import _init
+
+    _init()
+    _runtime_initialized = True
+
+
 from .version import __version__
 
 __all__ = [
-    'AutoConfig',
-    'AutoModelForCausalLM',
-    'logger',
-    'str_dtype_to_trt',
-    'torch_dtype_to_trt',
-    'str_dtype_to_torch',
-    'default_gpus_per_node',
-    'local_mpi_rank',
-    'local_mpi_size',
-    'mpi_barrier',
-    'mpi_comm',
-    'mpi_rank',
-    'set_mpi_comm',
-    'mpi_world_size',
-    'constant',
-    'default_net',
-    'default_trtnet',
-    'precision',
-    'net_guard',
-    'torch_models',
-    'Network',
-    'Mapping',
-    'MnnvlMemory',
-    'MnnvlMoe',
-    'MoEAlltoallInfo',
-    'PluginBase',
-    'Builder',
-    'BuilderConfig',
-    'build',
-    'BuildConfig',
-    'Tensor',
-    'Parameter',
-    'runtime',
-    'Module',
-    'functional',
-    'models',
-    'quantization',
-    'tools',
-    'LLM',
-    'AsyncLLM',
-    'MultimodalEncoder',
-    'LlmArgs',
-    'TorchLlmArgs',
-    'TrtLlmArgs',
-    'SamplingParams',
-    'VisualGenArgs',
-    'DisaggregatedParams',
-    'KvCacheConfig',
-    'math_utils',
-    'VisualGen',
-    'VisualGenParams',
-    '__version__',
+    "AutoConfig",
+    "AutoModelForCausalLM",
+    "logger",
+    "str_dtype_to_trt",
+    "torch_dtype_to_trt",
+    "str_dtype_to_torch",
+    "default_gpus_per_node",
+    "local_mpi_rank",
+    "local_mpi_size",
+    "mpi_barrier",
+    "mpi_comm",
+    "mpi_rank",
+    "set_mpi_comm",
+    "mpi_world_size",
+    "constant",
+    "default_net",
+    "default_trtnet",
+    "precision",
+    "net_guard",
+    "torch_models",
+    "Network",
+    "Mapping",
+    "MnnvlMemory",
+    "MnnvlMoe",
+    "MoEAlltoallInfo",
+    "PluginBase",
+    "Builder",
+    "BuilderConfig",
+    "build",
+    "BuildConfig",
+    "Tensor",
+    "Parameter",
+    "runtime",
+    "Module",
+    "functional",
+    "models",
+    "quantization",
+    "tools",
+    "LLM",
+    "AsyncLLM",
+    "MultimodalEncoder",
+    "LlmArgs",
+    "TorchLlmArgs",
+    "TrtLlmArgs",
+    "SamplingParams",
+    "VisualGenArgs",
+    "DisaggregatedParams",
+    "KvCacheConfig",
+    "math_utils",
+    "VisualGen",
+    "VisualGenParams",
+    "__version__",
 ]
 
-_init()
+_LAZY_EXPORTS = {
+    "AutoConfig": (".models.automodel", "AutoConfig"),
+    "AutoModelForCausalLM": (".models.automodel", "AutoModelForCausalLM"),
+    "logger": (".logger", "logger"),
+    "str_dtype_to_trt": ("._utils", "str_dtype_to_trt"),
+    "torch_dtype_to_trt": ("._utils", "torch_dtype_to_trt"),
+    "str_dtype_to_torch": ("._utils", "str_dtype_to_torch"),
+    "default_gpus_per_node": ("._utils", "default_gpus_per_node"),
+    "local_mpi_rank": ("._utils", "local_mpi_rank"),
+    "local_mpi_size": ("._utils", "local_mpi_size"),
+    "mpi_barrier": ("._utils", "mpi_barrier"),
+    "mpi_comm": ("._utils", "mpi_comm"),
+    "mpi_rank": ("._utils", "mpi_rank"),
+    "set_mpi_comm": ("._utils", "set_mpi_comm"),
+    "mpi_world_size": ("._utils", "mpi_world_size"),
+    "constant": (".functional", "constant"),
+    "default_net": ("._common", "default_net"),
+    "default_trtnet": ("._common", "default_trtnet"),
+    "precision": ("._common", "precision"),
+    "net_guard": (".network", "net_guard"),
+    "torch_models": ("._torch.models", None),
+    "Network": (".network", "Network"),
+    "Mapping": (".mapping", "Mapping"),
+    "MnnvlMemory": ("._mnnvl_utils", "MnnvlMemory"),
+    "MnnvlMoe": ("._mnnvl_utils", "MnnvlMoe"),
+    "MoEAlltoallInfo": ("._mnnvl_utils", "MoEAlltoallInfo"),
+    "PluginBase": (".python_plugin", "PluginBase"),
+    "Builder": (".builder", "Builder"),
+    "BuilderConfig": (".builder", "BuilderConfig"),
+    "build": (".builder", "build"),
+    "BuildConfig": (".builder", "BuildConfig"),
+    "Tensor": (".functional", "Tensor"),
+    "Parameter": (".parameter", "Parameter"),
+    "runtime": (".runtime", None),
+    "Module": (".module", "Module"),
+    "functional": (".functional", None),
+    "models": (".models", None),
+    "quantization": (".quantization", None),
+    "tools": (".tools", None),
+    "LLM": (".llmapi", "LLM"),
+    "AsyncLLM": (".llmapi", "AsyncLLM"),
+    "MultimodalEncoder": (".llmapi", "MultimodalEncoder"),
+    "LlmArgs": (".llmapi.llm_args", "LlmArgs"),
+    "TorchLlmArgs": (".llmapi.llm_args", "TorchLlmArgs"),
+    "TrtLlmArgs": (".llmapi.llm_args", "TrtLlmArgs"),
+    "SamplingParams": (".sampling_params", "SamplingParams"),
+    "VisualGenArgs": ("._torch.visual_gen.config", "VisualGenArgs"),
+    "DisaggregatedParams": (".disaggregated_params", "DisaggregatedParams"),
+    "KvCacheConfig": (".llmapi", "KvCacheConfig"),
+    "math_utils": (".math_utils", None),
+    "VisualGen": (".llmapi", "VisualGen"),
+    "VisualGenParams": (".llmapi", "VisualGenParams"),
+}
 
-print(f"[TensorRT-LLM] TensorRT LLM version: {__version__}")
+_LIGHT_EXPORTS = {"__version__"}
 
-sys.stdout.flush()
+
+def _load_export(name: str) -> Any:
+    module_name, attr_name = _LAZY_EXPORTS[name]
+
+    if name not in _LIGHT_EXPORTS:
+        _prepare_runtime_environment()
+
+    module = importlib.import_module(module_name, __name__)
+    value = module if attr_name is None else getattr(module, attr_name)
+
+    if name not in _LIGHT_EXPORTS:
+        _initialize_runtime()
+
+    globals()[name] = value
+    return value
+
+
+def __getattr__(name: str) -> Any:
+    if name == "__version__":
+        return __version__
+    if name in _LAZY_EXPORTS:
+        return _load_export(name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
