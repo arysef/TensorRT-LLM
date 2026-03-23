@@ -8,7 +8,6 @@ import signal
 import socket
 import subprocess  # nosec B404
 import sys
-from enum import StrEnum
 from functools import cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +15,11 @@ from typing import Any, Optional
 
 import click
 import yaml
+
+try:
+    from enum import StrEnum
+except ImportError:
+    from strenum import StrEnum
 
 from trtllm_cli._serve_metadata import (
     add_disaggregated_mpi_worker_options,
