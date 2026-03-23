@@ -17,6 +17,8 @@ from typing import Optional
 import click
 
 import tensorrt_llm.profiler as profiler
+from trtllm_cli._eval_metadata import EVAL_SUBCOMMANDS, add_eval_options
+from trtllm_cli._help import NotRequiredForHelp
 
 from .. import LLM as PyTorchLLM
 from .._tensorrt_engine import LLM
@@ -25,103 +27,30 @@ from ..evaluate import (GSM8K, MMLU, MMMU, CnnDailymail, GPQADiamond,
                         LongBenchV2)
 from ..llmapi import BuildConfig, KvCacheConfig
 from ..llmapi.llm_utils import update_llm_args_with_extra_options
-from ..logger import logger, severity_map
+from ..logger import logger
+
+EVAL_COMMANDS_BY_NAME = {
+    CnnDailymail.command.name: CnnDailymail.command,
+    MMLU.command.name: MMLU.command,
+    GSM8K.command.name: GSM8K.command,
+    GPQADiamond.command.name: GPQADiamond.command,
+    GPQAMain.command.name: GPQAMain.command,
+    GPQAExtended.command.name: GPQAExtended.command,
+    JsonModeEval.command.name: JsonModeEval.command,
+    MMMU.command.name: MMMU.command,
+    LongBenchV1.command.name: LongBenchV1.command,
+    LongBenchV2.command.name: LongBenchV2.command,
+}
 
 
 @click.group()
-@click.option(
-    "--model",
-    required=True,
-    type=str,
-    help="model name | HF checkpoint path | TensorRT engine path",
-)
-@click.option("--tokenizer",
-              type=str,
-              default=None,
-              help="Path | Name of the tokenizer."
-              "Specify this value only if using TensorRT engine as model.")
-@click.option(
-    "--custom_tokenizer",
-    type=str,
-    default=None,
-    help=
-    "Custom tokenizer type: alias (e.g., 'deepseek_v32') or Python import path "
-    "(e.g., 'tensorrt_llm.tokenizer.deepseek_v32.DeepseekV32Tokenizer'). [Experimental]"
-)
-@click.option(
-    "--backend",
-    type=click.Choice(["pytorch", "tensorrt"]),
-    default="pytorch",
-    help="The backend to use for evaluation. Default is pytorch backend.")
-@click.option('--log_level',
-              type=click.Choice(severity_map.keys()),
-              default='info',
-              help="The logging level.")
-@click.option("--max_beam_width",
-              type=int,
-              default=BuildConfig.model_fields["max_beam_width"].default,
-              help="Maximum number of beams for beam search decoding.")
-@click.option("--max_batch_size",
-              type=int,
-              default=BuildConfig.model_fields["max_batch_size"].default,
-              help="Maximum number of requests that the engine can schedule.")
-@click.option(
-    "--max_num_tokens",
-    type=int,
-    default=BuildConfig.model_fields["max_num_tokens"].default,
-    help=
-    "Maximum number of batched input tokens after padding is removed in each batch."
-)
-@click.option(
-    "--max_seq_len",
-    type=int,
-    default=BuildConfig.model_fields["max_seq_len"].default,
-    help="Maximum total length of one request, including prompt and outputs. "
-    "If unspecified, the value is deduced from the model config.")
-@click.option("--tp_size", type=int, default=1, help='Tensor parallelism size.')
-@click.option("--pp_size",
-              type=int,
-              default=1,
-              help='Pipeline parallelism size.')
-@click.option("--ep_size",
-              type=int,
-              default=None,
-              help="expert parallelism size")
-@click.option("--gpus_per_node",
-              type=int,
-              default=None,
-              help="Number of GPUs per node. Default to None, and it will be "
-              "detected automatically.")
-@click.option("--kv_cache_free_gpu_memory_fraction",
-              type=float,
-              default=0.9,
-              help="Free GPU memory fraction reserved for KV Cache, "
-              "after allocating model weights and buffers.")
-@click.option("--trust_remote_code",
-              is_flag=True,
-              default=False,
-              help="Flag for HF transformers.")
-@click.option("--revision",
-              type=str,
-              default=None,
-              help="The revision to use for the HuggingFace model "
-              "(branch name, tag name, or commit id).")
-@click.option("--config",
-              "--extra_llm_api_options",
-              "extra_llm_api_options",
-              type=str,
-              default=None,
-              help="Path to a YAML file that overwrites the parameters. "
-              "Can be specified as either --config or --extra_llm_api_options.")
-@click.option("--disable_kv_cache_reuse",
-              is_flag=True,
-              default=False,
-              help="Flag for disabling KV cache reuse.")
+@add_eval_options(option_cls=NotRequiredForHelp)
 @click.pass_context
 def main(ctx, model: str, tokenizer: Optional[str],
          custom_tokenizer: Optional[str], log_level: str, backend: str,
          max_beam_width: int, max_batch_size: int, max_num_tokens: int,
-         max_seq_len: int, tp_size: int, pp_size: int, ep_size: Optional[int],
+         max_seq_len: Optional[int], tp_size: int, pp_size: int,
+         ep_size: Optional[int],
          gpus_per_node: Optional[int], kv_cache_free_gpu_memory_fraction: float,
          trust_remote_code: bool, revision: Optional[str],
          extra_llm_api_options: Optional[str], disable_kv_cache_reuse: bool):
@@ -177,16 +106,10 @@ def main(ctx, model: str, tokenizer: Optional[str],
     ctx.obj = llm
 
 
-main.add_command(CnnDailymail.command)
-main.add_command(MMLU.command)
-main.add_command(GSM8K.command)
-main.add_command(GPQADiamond.command)
-main.add_command(GPQAMain.command)
-main.add_command(GPQAExtended.command)
-main.add_command(JsonModeEval.command)
-main.add_command(MMMU.command)
-main.add_command(LongBenchV1.command)
-main.add_command(LongBenchV2.command)
+for name, short_help in EVAL_SUBCOMMANDS:
+    command = EVAL_COMMANDS_BY_NAME[name]
+    command.short_help = short_help
+    main.add_command(command, name=name)
 
 if __name__ == "__main__":
     main()

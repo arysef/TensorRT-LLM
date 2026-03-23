@@ -3,59 +3,29 @@ from typing import Optional
 
 import click
 
+from trtllm_cli._bench_metadata import (BENCH_GROUP_CONTEXT_SETTINGS,
+                                        BENCH_SUBCOMMANDS,
+                                        add_bench_options)
+from trtllm_cli._help import NotRequiredForHelp
 from tensorrt_llm.bench.benchmark.low_latency import latency_command
 from tensorrt_llm.bench.benchmark.throughput import throughput_command
 from tensorrt_llm.bench.benchmark.visual_gen import visual_gen_command
 from tensorrt_llm.bench.build.build import build_command
 from tensorrt_llm.bench.dataclasses.general import BenchmarkEnvironment
 from tensorrt_llm.bench.dataset.prepare_dataset import prepare_dataset
-from tensorrt_llm.logger import logger, severity_map
+from tensorrt_llm.logger import logger
+
+SUBCOMMANDS_BY_NAME = {
+    "build": build_command,
+    "throughput": throughput_command,
+    "latency": latency_command,
+    "prepare-dataset": prepare_dataset,
+    "visual-gen": visual_gen_command,
+}
 
 
-class NotRequiredForHelp(click.Option):
-    """A click.Option that is not enforced as required when --help is in args."""
-
-    def handle_parse_result(self, ctx, opts, args):
-        help_flags = ctx.help_option_names or ['--help']
-        if any(arg in help_flags for arg in args):
-            self.required = False
-        return super().handle_parse_result(ctx, opts, args)
-
-
-@click.group(name="trtllm-bench", context_settings={'show_default': True})
-@click.option(
-    "--model",
-    "-m",
-    required=True,
-    type=str,
-    cls=NotRequiredForHelp,
-    help="The Huggingface name of the model to benchmark.",
-)
-@click.option(
-    "--model_path",
-    required=False,
-    default=None,
-    type=click.Path(writable=False, readable=True, path_type=Path),
-    help=
-    "Path to a Huggingface checkpoint directory for loading model components.",
-)
-@click.option(
-    "--workspace",
-    "-w",
-    required=False,
-    type=click.Path(writable=True, readable=True, path_type=Path),
-    default="/tmp",  # nosec B108
-    help="The directory to store benchmarking intermediate files.",
-)
-@click.option('--log_level',
-              type=click.Choice(severity_map.keys()),
-              default='info',
-              help="The logging level.")
-@click.option("--revision",
-              type=str,
-              default=None,
-              help="The revision to use for the HuggingFace model "
-              "(branch name, tag name, or commit id).")
+@click.group(name="trtllm-bench", context_settings=BENCH_GROUP_CONTEXT_SETTINGS)
+@add_bench_options(option_cls=NotRequiredForHelp)
 @click.pass_context
 def main(
     ctx,
@@ -78,11 +48,10 @@ def main(
     ctx.obj.workspace.mkdir(parents=True, exist_ok=True)
 
 
-main.add_command(build_command)
-main.add_command(throughput_command)
-main.add_command(latency_command)
-main.add_command(prepare_dataset)
-main.add_command(visual_gen_command)
+for name, short_help in BENCH_SUBCOMMANDS:
+    command = SUBCOMMANDS_BY_NAME[name]
+    command.short_help = short_help
+    main.add_command(command, name=name)
 
 if __name__ == "__main__":
     main()

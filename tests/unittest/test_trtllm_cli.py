@@ -13,13 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ast
 import sys
+from pathlib import Path
 
 from click.testing import CliRunner
+import pytest
 
 import trtllm_cli.main as main_cli
 from trtllm_cli import bench, eval as eval_cli, serve
 from trtllm_cli._dispatch import invocation_state
+from trtllm_cli._serve_metadata import (LOG_LEVELS, REASONING_PARSER_CHOICES,
+                                        TOOL_PARSER_CHOICES)
 from trtllm_cli.main import cli as root_cli
 
 
@@ -29,6 +34,77 @@ def _new_tensorrt_llm_modules(baseline: set[str]) -> set[str]:
         for name in set(sys.modules) - baseline
         if name == "tensorrt_llm" or name.startswith("tensorrt_llm.")
     }
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _parse_source(relative_path: str) -> ast.Module:
+    return ast.parse((_repo_root() / relative_path).read_text(encoding="utf-8"))
+
+
+def _extract_assignment_node(relative_path: str, name: str):
+    tree = _parse_source(relative_path)
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id == name:
+                    return node.value
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target,
+                                                           ast.Name):
+            if node.target.id == name:
+                return node.value
+    raise AssertionError(f"Could not find assignment for {name} in {relative_path}")
+
+
+def _extract_class_attribute_node(relative_path: str, class_name: str,
+                                  name: str):
+    tree = _parse_source(relative_path)
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+            continue
+        for class_node in node.body:
+            if isinstance(class_node, ast.Assign):
+                for target in class_node.targets:
+                    if isinstance(target, ast.Name) and target.id == name:
+                        return class_node.value
+            if isinstance(class_node, ast.AnnAssign) and isinstance(
+                    class_node.target, ast.Name):
+                if class_node.target.id == name:
+                    return class_node.value
+    raise AssertionError(
+        f"Could not find class attribute {class_name}.{name} in {relative_path}")
+
+
+def _dict_string_keys(node: ast.AST) -> tuple[str, ...]:
+    if not isinstance(node, ast.Dict):
+        raise AssertionError(f"Expected ast.Dict, got {type(node).__name__}")
+    keys: list[str] = []
+    for key in node.keys:
+        if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
+            raise AssertionError("Expected all dict keys to be constant strings")
+        keys.append(key.value)
+    return tuple(keys)
+
+
+def _extract_reasoning_parser_keys(relative_path: str) -> tuple[str, ...]:
+    tree = _parse_source(relative_path)
+    keys: list[str] = []
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call):
+                continue
+            if not isinstance(decorator.func, ast.Name):
+                continue
+            if decorator.func.id != "register_reasoning_parser":
+                continue
+            for arg in decorator.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    keys.append(arg.value)
+    return tuple(keys)
 
 
 def test_root_help_lists_available_commands_without_importing_runtime():
@@ -321,207 +397,63 @@ def test_eval_subcommand_help_is_lightweight(monkeypatch):
     assert not _new_tensorrt_llm_modules(baseline)
 
 
-def test_root_build_help_is_lightweight(monkeypatch):
+@pytest.mark.parametrize("command_name", ["build", "prune", "refit"])
+@pytest.mark.parametrize("help_flag", ["--help", "-h"])
+def test_root_argparse_help_delegates_without_importing_runtime(
+        monkeypatch, command_name, help_flag):
     runner = CliRunner()
     baseline = set(sys.modules)
+    calls = []
     monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
+                        lambda *args, **kwargs: calls.append((args, kwargs)))
 
-    with invocation_state(["build", "--help"],
-                          prog_name="trtllm",
-                          root_mode=True):
-        result = runner.invoke(root_cli, ["build", "--help"])
+    result = runner.invoke(root_cli, [command_name, help_flag])
 
     assert result.exit_code == 0, result.output
-    assert "Build TensorRT-LLM engines." in result.output
+    assert calls == [(
+        (f"tensorrt_llm.commands.{command_name}", "main"),
+        {
+            "top_level_command": command_name,
+            "standalone_prog_name": f"trtllm-{command_name}",
+        },
+    )]
     assert not _new_tensorrt_llm_modules(baseline)
 
 
-def test_build_help_is_lightweight(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.build_command,
-                           ["--help"],
-                           prog_name="trtllm-build")
-
-    assert result.exit_code == 0, result.output
-    assert "Build TensorRT-LLM engines." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_build_requires_checkpoint_dir_or_model_config_before_delegate(
-        monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.build_command, [], prog_name="trtllm-build")
-
-    assert result.exit_code == 2, result.output
-    assert "Either --checkpoint_dir or --model_config is required." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_build_invalid_model_config_fails_before_delegate(monkeypatch,
-                                                          tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    bad_config = tmp_path / "model-config.json"
-    bad_config.write_text("{invalid-json", encoding="utf-8")
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.build_command,
-                           ["--model_config", str(bad_config)],
-                           prog_name="trtllm-build")
-
-    assert result.exit_code == 2, result.output
-    assert "Invalid value for --model_config" in result.output
-    assert "Invalid JSON" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_build_help_skips_invalid_model_config_validation(monkeypatch,
-                                                          tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    bad_config = tmp_path / "model-config.json"
-    bad_config.write_text("{invalid-json", encoding="utf-8")
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.build_command,
-                           ["--model_config", str(bad_config), "--help"],
-                           prog_name="trtllm-build")
-
-    assert result.exit_code == 0, result.output
-    assert "Build TensorRT-LLM engines." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_prune_missing_checkpoint_dir_fails_before_delegate(monkeypatch):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.prune_command, [], prog_name="trtllm-prune")
-
-    assert result.exit_code == 2, result.output
-    assert "Invalid value for --checkpoint_dir: Option is required." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_prune_invalid_checkpoint_config_fails_before_delegate(monkeypatch,
-                                                               tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    checkpoint_dir = tmp_path / "checkpoint"
-    checkpoint_dir.mkdir()
-    (checkpoint_dir / "config.json").write_text("{invalid-json",
-                                                 encoding="utf-8")
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.prune_command,
-                           ["--checkpoint_dir", str(checkpoint_dir)],
-                           prog_name="trtllm-prune")
-
-    assert result.exit_code == 2, result.output
-    assert "Invalid value for --checkpoint_dir" in result.output
-    assert "Invalid JSON" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_prune_checkpoint_dir_must_be_directory(monkeypatch, tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    config_file = tmp_path / "config.json"
-    config_file.write_text('{"architecture": "LlamaForCausalLM"}',
-                           encoding="utf-8")
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.prune_command,
-                           ["--checkpoint_dir", str(config_file)],
-                           prog_name="trtllm-prune")
-
-    assert result.exit_code == 2, result.output
-    assert "Invalid value for --checkpoint_dir" in result.output
-    assert "Directory" in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_refit_missing_output_dir_fails_before_delegate(monkeypatch, tmp_path):
-    runner = CliRunner()
-    baseline = set(sys.modules)
-    engine_dir = tmp_path / "engine"
-    checkpoint_dir = tmp_path / "checkpoint"
-    engine_dir.mkdir()
-    checkpoint_dir.mkdir()
-    (engine_dir / "config.json").write_text(
-        '{"pretrained_config": {"architecture": "LlamaForCausalLM"}}',
-        encoding="utf-8")
-    (checkpoint_dir / "config.json").write_text(
-        '{"architecture": "LlamaForCausalLM"}', encoding="utf-8")
-    monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
-
-    result = runner.invoke(main_cli.refit_command, [
-        "--engine_dir",
-        str(engine_dir),
-        "--checkpoint_dir",
-        str(checkpoint_dir),
+@pytest.mark.parametrize(
+    ("command_name", "args"),
+    [
+        ("build", ["--checkpoint_dir", "dummy-checkpoint"]),
+        ("prune", ["--checkpoint_dir", "dummy-checkpoint"]),
+        ("refit", [
+            "--engine_dir",
+            "dummy-engine",
+            "--checkpoint_dir",
+            "dummy-checkpoint",
+            "--output_dir",
+            "dummy-output",
+        ]),
     ],
-                           prog_name="trtllm-refit")
-
-    assert result.exit_code == 2, result.output
-    assert "Invalid value for --output_dir: Option is required." in result.output
-    assert not _new_tensorrt_llm_modules(baseline)
-
-
-def test_refit_architecture_mismatch_fails_before_delegate(monkeypatch,
-                                                           tmp_path):
+)
+def test_root_argparse_command_delegates_raw_args_without_importing_runtime(
+        monkeypatch, command_name, args):
     runner = CliRunner()
     baseline = set(sys.modules)
-    engine_dir = tmp_path / "engine"
-    checkpoint_dir = tmp_path / "checkpoint"
-    engine_dir.mkdir()
-    checkpoint_dir.mkdir()
-    (engine_dir / "config.json").write_text(
-        '{"pretrained_config": {"architecture": "LlamaForCausalLM"}}',
-        encoding="utf-8")
-    (checkpoint_dir / "config.json").write_text(
-        '{"architecture": "MistralForCausalLM"}', encoding="utf-8")
+    calls = []
     monkeypatch.setattr(main_cli, "delegate_argparse_command",
-                        lambda *args, **kwargs: (_ for _ in ()).throw(
-                            AssertionError("delegate should not be called")))
+                        lambda *delegate_args, **kwargs: calls.append(
+                            (delegate_args, kwargs)))
 
-    result = runner.invoke(main_cli.refit_command, [
-        "--engine_dir",
-        str(engine_dir),
-        "--checkpoint_dir",
-        str(checkpoint_dir),
-        "--output_dir",
-        str(tmp_path / "refit-out"),
-    ],
-                           prog_name="trtllm-refit")
+    result = runner.invoke(root_cli, [command_name, *args])
 
-    assert result.exit_code == 2, result.output
-    assert "Engine architecture does not match checkpoint architecture." in result.output
+    assert result.exit_code == 0, result.output
+    assert calls == [(
+        (f"tensorrt_llm.commands.{command_name}", "main"),
+        {
+            "top_level_command": command_name,
+            "standalone_prog_name": f"trtllm-{command_name}",
+        },
+    )]
     assert not _new_tensorrt_llm_modules(baseline)
 
 
@@ -600,6 +532,8 @@ def test_serve_invalid_config_fails_before_delegate(monkeypatch, tmp_path):
                            prog_name="trtllm-serve")
 
     assert result.exit_code == 2, result.output
+    assert "Usage: trtllm-serve [OPTIONS] MODEL" in result.output
+    assert "Usage: trtllm-serve serve" not in result.output
     assert "Invalid value for --config" in result.output
     assert "Invalid YAML" in result.output
     assert not _new_tensorrt_llm_modules(baseline)
@@ -620,6 +554,8 @@ def test_serve_invalid_media_io_kwargs_fails_before_delegate(monkeypatch):
                            prog_name="trtllm-serve")
 
     assert result.exit_code == 2, result.output
+    assert "Usage: trtllm-serve [OPTIONS] MODEL" in result.output
+    assert "Usage: trtllm-serve serve" not in result.output
     assert "Invalid value for --media_io_kwargs" in result.output
     assert "Invalid JSON" in result.output
     assert not _new_tensorrt_llm_modules(baseline)
@@ -661,6 +597,28 @@ def test_root_serve_default_command_delegates(monkeypatch):
     assert calls == ["serve"]
 
 
+def test_root_serve_implicit_default_validation_usage_is_collapsed(monkeypatch):
+    runner = CliRunner()
+    baseline = set(sys.modules)
+    monkeypatch.setattr(serve, "_delegate_to_legacy_serve",
+                        lambda: (_ for _ in ()).throw(
+                            AssertionError("delegate should not be called")))
+
+    result = runner.invoke(root_cli, [
+        "serve",
+        "dummy-model",
+        "--media_io_kwargs",
+        "{invalid-json",
+    ],
+                           prog_name="trtllm")
+
+    assert result.exit_code == 2, result.output
+    assert "Usage: trtllm serve [OPTIONS] MODEL" in result.output
+    assert "Usage: trtllm serve serve" not in result.output
+    assert "Invalid value for --media_io_kwargs" in result.output
+    assert not _new_tensorrt_llm_modules(baseline)
+
+
 def test_root_bench_command_delegates(monkeypatch):
     runner = CliRunner()
     calls = []
@@ -687,3 +645,23 @@ def test_bench_model_requirement_is_restored_after_help(monkeypatch):
     assert "Run throughput benchmarking." in help_result.output
     assert missing_model_result.exit_code == 2
     assert "Missing option '--model' / '-m'." in missing_model_result.output
+
+
+def test_serve_metadata_reasoning_parser_choices_match_runtime_source():
+    assert REASONING_PARSER_CHOICES == _extract_reasoning_parser_keys(
+        "tensorrt_llm/llmapi/reasoning_parser.py")
+
+
+def test_serve_metadata_tool_parser_choices_match_runtime_source():
+    tool_parsers = _extract_class_attribute_node(
+        "tensorrt_llm/serve/tool_parser/tool_parser_factory.py",
+        "ToolParserFactory", "parsers")
+
+    assert TOOL_PARSER_CHOICES == _dict_string_keys(tool_parsers)
+
+
+def test_serve_metadata_log_levels_match_runtime_source():
+    severity_map = _extract_assignment_node("tensorrt_llm/logger.py",
+                                            "severity_map")
+
+    assert LOG_LEVELS == _dict_string_keys(severity_map)

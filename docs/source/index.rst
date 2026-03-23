@@ -44,6 +44,7 @@ Welcome to TensorRT LLM's Documentation!
    :caption: CLI Reference
    :name: CLI Reference
 
+   commands/trtllm
    commands/trtllm-bench
    commands/trtllm-eval
    commands/trtllm-serve/index

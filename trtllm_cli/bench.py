@@ -15,23 +15,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import click
 
+from trtllm_cli._bench_metadata import (BENCH_GROUP_CONTEXT_SETTINGS,
+                                        BENCH_SUBCOMMANDS, add_bench_options)
 from trtllm_cli._dispatch import delegate_click_command
 from trtllm_cli._help import (NotRequiredForHelp, echo_lightweight_help,
                               should_show_lightweight_help)
-
-LOG_LEVELS = (
-    "internal_error",
-    "error",
-    "warning",
-    "info",
-    "verbose",
-    "debug",
-    "trace",
-)
 PROXY_CONTEXT_SETTINGS = {
     "allow_extra_args": True,
     "ignore_unknown_options": True,
@@ -67,55 +57,13 @@ def _proxy_subcommand(name: str, short_help: str):
     return command
 
 
-@click.group(context_settings={"show_default": True})
-@click.option(
-    "--model",
-    "-m",
-    required=True,
-    type=str,
-    cls=NotRequiredForHelp,
-    help="The Huggingface name of the model to benchmark.",
-)
-@click.option(
-    "--model_path",
-    required=False,
-    default=None,
-    type=click.Path(writable=False, readable=True, path_type=Path),
-    help=
-    "Path to a Huggingface checkpoint directory for loading model components.",
-)
-@click.option(
-    "--workspace",
-    "-w",
-    required=False,
-    type=click.Path(writable=True, readable=True, path_type=Path),
-    default="/tmp",  # nosec B108
-    help="The directory to store benchmarking intermediate files.",
-)
-@click.option(
-    "--log_level",
-    type=click.Choice(LOG_LEVELS),
-    default="info",
-    help="The logging level.",
-)
-@click.option(
-    "--revision",
-    type=str,
-    default=None,
-    help="The revision to use for the HuggingFace model "
-    "(branch name, tag name, or commit id).",
-)
-def cli(model: str, model_path: Path, workspace: Path, log_level: str,
+@click.group(context_settings=BENCH_GROUP_CONTEXT_SETTINGS)
+@add_bench_options(option_cls=NotRequiredForHelp)
+def cli(model: str, model_path, workspace, log_level: str,
         revision: str | None) -> None:
     """Benchmark TensorRT-LLM models."""
     del model, model_path, workspace, log_level, revision
 
 
-cli.add_command(_proxy_subcommand("build", "Build a benchmark engine."))
-cli.add_command(
-    _proxy_subcommand("throughput", "Run throughput benchmarking."))
-cli.add_command(_proxy_subcommand("latency", "Run latency benchmarking."))
-cli.add_command(
-    _proxy_subcommand("prepare-dataset", "Prepare benchmark datasets."))
-cli.add_command(
-    _proxy_subcommand("visual-gen", "Run visual generation benchmarking."))
+for name, short_help in BENCH_SUBCOMMANDS:
+    cli.add_command(_proxy_subcommand(name, short_help))

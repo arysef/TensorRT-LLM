@@ -416,9 +416,9 @@ setup(
     entry_points={
         'console_scripts': [
             'trtllm=trtllm_cli.main:main',
-            'trtllm-build=trtllm_cli.main:build_entry',
-            'trtllm-prune=trtllm_cli.main:prune_entry',
-            'trtllm-refit=trtllm_cli.main:refit_entry',
+            'trtllm-build=tensorrt_llm.commands.build:main',
+            'trtllm-prune=tensorrt_llm.commands.prune:main',
+            'trtllm-refit=tensorrt_llm.commands.refit:main',
             'trtllm-bench=trtllm_cli.main:bench_entry',
             'trtllm-serve=trtllm_cli.main:serve_entry',
             'trtllm-eval=trtllm_cli.main:eval_entry'

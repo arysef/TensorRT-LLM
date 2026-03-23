@@ -87,10 +87,52 @@ def _validate_disaggregated_mpi_worker_options(config_file: str | None) -> None:
 class DefaultGroup(click.Group):
     """Click group that preserves trtllm-serve's default serve subcommand."""
 
-    def resolve_command(self, ctx, args):
+    def _resolve_default_command(self, ctx, args):
         if args and not args[0].startswith("-") and args[0] not in self.commands:
             return "serve", self.commands["serve"], args
+        return None
+
+    def resolve_command(self, ctx, args):
+        default_command = self._resolve_default_command(ctx, args)
+        if default_command is not None:
+            return default_command
         return super().resolve_command(ctx, args)
+
+    def invoke(self, ctx):
+        def _process_result(value):
+            if self._result_callback is not None:
+                value = ctx.invoke(self._result_callback, value, **ctx.params)
+            return value
+
+        protected_args = getattr(ctx, "_protected_args", ctx.protected_args)
+        if not protected_args:
+            return super().invoke(ctx)
+
+        args = [*protected_args, *ctx.args]
+        ctx.args = []
+        if hasattr(ctx, "_protected_args"):
+            ctx._protected_args = []
+        else:
+            ctx.protected_args = []
+
+        with ctx:
+            default_command = self._resolve_default_command(ctx, args)
+            if default_command is None:
+                cmd_name, cmd, args = super().resolve_command(ctx, args)
+                ctx.invoked_subcommand = cmd_name
+                click.Command.invoke(self, ctx)
+                sub_ctx = cmd.make_context(cmd_name, args, parent=ctx)
+            else:
+                cmd_name, cmd, args = default_command
+                ctx.invoked_subcommand = cmd_name
+                click.Command.invoke(self, ctx)
+                sub_ctx = cmd.make_context(ctx.info_name,
+                                           args,
+                                           parent=ctx.parent)
+                sub_ctx.meta["implicit_default_command"] = True
+
+            with sub_ctx:
+                return _process_result(sub_ctx.command.invoke(sub_ctx))
 
 
 @click.command(
@@ -106,6 +148,9 @@ class DefaultGroup(click.Group):
 @click.pass_context
 def serve_proxy(ctx, model: str | None, **_kwargs) -> None:
     if should_show_lightweight_help(ctx, ctx.args):
+        if ctx.meta.get("implicit_default_command"):
+            echo_lightweight_help(ctx)
+            return
         if ctx.parent:
             if ctx.parent.parent:
                 echo_lightweight_help(ctx,
