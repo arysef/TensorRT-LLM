@@ -23,8 +23,6 @@ from trtllm_cli._serve_metadata import (
     add_mm_embedding_serve_options,
     add_serve_options,
 )
-from trtllm_cli._help import (HelpPassthroughArgument,
-                              HelpPassthroughOption)
 
 # Global variable to store the Popen object of the child process
 _child_p_global: Optional[subprocess.Popen] = None
@@ -595,9 +593,7 @@ def launch_visual_gen_server(
 
 
 @click.command("serve")
-@add_serve_options(model_required=True,
-                   option_cls=HelpPassthroughOption,
-                   argument_cls=HelpPassthroughArgument)
+@add_serve_options(model_required=True)
 def serve(
         model: str, tokenizer: Optional[str], custom_tokenizer: Optional[str],
         host: str, port: int, log_level: str, backend: str, max_beam_width: int,
@@ -770,9 +766,7 @@ def serve(
 
 
 @click.command("mm_embedding_serve")
-@add_mm_embedding_serve_options(model_required=True,
-                                option_cls=HelpPassthroughOption,
-                                argument_cls=HelpPassthroughArgument)
+@add_mm_embedding_serve_options(model_required=True)
 def serve_encoder(model: str, host: str, port: int, log_level: str,
                   max_batch_size: int, max_num_tokens: int,
                   gpus_per_node: Optional[int], trust_remote_code: bool,
@@ -813,7 +807,7 @@ def serve_encoder(model: str, host: str, port: int, log_level: str,
 
 
 @click.command("disaggregated")
-@add_disaggregated_options(option_cls=HelpPassthroughOption)
+@add_disaggregated_options()
 def disaggregated(
     config_file: Optional[str],
     metadata_server_config_file: Optional[str],
@@ -885,7 +879,7 @@ def set_cuda_device():
 
 
 @click.command("disaggregated_mpi_worker")
-@add_disaggregated_mpi_worker_options(option_cls=HelpPassthroughOption)
+@add_disaggregated_mpi_worker_options()
 def disaggregated_mpi_worker(config_file: Optional[str], log_level: str):
     """Launching disaggregated MPI worker"""
 

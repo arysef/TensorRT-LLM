@@ -6,10 +6,23 @@ from typing import Optional
 
 import click
 
-from trtllm_cli._bench_metadata import (BENCH_GROUP_CONTEXT_SETTINGS,
-                                        BENCH_SUBCOMMANDS,
-                                        add_bench_options)
-from trtllm_cli._help import NotRequiredForHelp
+LOG_LEVELS = (
+    "internal_error",
+    "error",
+    "warning",
+    "info",
+    "verbose",
+    "debug",
+    "trace",
+)
+BENCH_GROUP_CONTEXT_SETTINGS = {"show_default": True}
+BENCH_SUBCOMMANDS = (
+    ("build", "Build a benchmark engine."),
+    ("throughput", "Run throughput benchmarking."),
+    ("latency", "Run latency benchmarking."),
+    ("prepare-dataset", "Prepare benchmark datasets."),
+    ("visual-gen", "Run visual generation benchmarking."),
+)
 
 SUBCOMMAND_SPECS = {
     "build": ("tensorrt_llm.bench.build.build", "build_command"),
@@ -49,7 +62,38 @@ class LazyBenchGroup(click.Group):
 @click.group(name="trtllm-bench",
              cls=LazyBenchGroup,
              context_settings=BENCH_GROUP_CONTEXT_SETTINGS)
-@add_bench_options(option_cls=NotRequiredForHelp)
+@click.option(
+    "--model",
+    "-m",
+    required=True,
+    type=str,
+    help="The Huggingface name of the model to benchmark.",
+)
+@click.option(
+    "--model_path",
+    required=False,
+    default=None,
+    type=click.Path(writable=False, readable=True, path_type=Path),
+    help=
+    "Path to a Huggingface checkpoint directory for loading model components.",
+)
+@click.option(
+    "--workspace",
+    "-w",
+    required=False,
+    type=click.Path(writable=True, readable=True, path_type=Path),
+    default="/tmp",  # nosec B108
+    help="The directory to store benchmarking intermediate files.",
+)
+@click.option('--log_level',
+              type=click.Choice(LOG_LEVELS),
+              default='info',
+              help="The logging level.")
+@click.option("--revision",
+              type=str,
+              default=None,
+              help="The revision to use for the HuggingFace model "
+              "(branch name, tag name, or commit id).")
 @click.pass_context
 def main(
     ctx,

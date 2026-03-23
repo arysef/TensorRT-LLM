@@ -76,18 +76,11 @@ class ChoiceWithAlias(click.Choice):
         return super().convert(value, param, ctx)
 
 
-def _option(*param_decls,
-            option_cls: type[click.Option] | None = None,
-            **kwargs) -> Callable:
-    if option_cls is not None:
-        kwargs.setdefault("cls", option_cls)
+def _option(*param_decls, **kwargs) -> Callable:
     return click.option(*param_decls, **kwargs)
 
 
-def add_serve_options(*,
-                      model_required: bool,
-                      option_cls: type[click.Option] | None = None,
-                      argument_cls: type[click.Argument] | None = None) -> Callable:
+def add_serve_options(*, model_required: bool) -> Callable:
 
     def decorator(command: Callable) -> Callable:
         command = _option(
@@ -97,7 +90,6 @@ def add_serve_options(*,
             help=help_info_with_stability_tag(
                 "Path to a YAML file with extra VISUAL_GEN model options.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--served_model_name",
@@ -108,7 +100,6 @@ def add_serve_options(*,
                 "used as the model name. This is useful when the model path is long or "
                 "when you want to expose a custom name to clients.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--grpc",
@@ -116,7 +107,6 @@ def add_serve_options(*,
             default=False,
             help="Run gRPC server instead of OpenAI HTTP server. "
             "gRPC server accepts pre-tokenized requests and returns raw token IDs.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--chat_template",
@@ -126,7 +116,6 @@ def add_serve_options(*,
                 "Specify a custom chat template. "
                 "Can be a file path or one-liner template string",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--video_pruning_rate",
@@ -137,7 +126,6 @@ def add_serve_options(*,
                 "Applied by Efficient Video Sampling (EVS). "
                 "None disables EVS, values in [0, 1) enable pruning.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--media_io_kwargs",
@@ -145,7 +133,6 @@ def add_serve_options(*,
             default=None,
             help=help_info_with_stability_tag(
                 "Keyword arguments for media I/O.", "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--enable_attention_dp",
@@ -153,7 +140,6 @@ def add_serve_options(*,
             default=False,
             help=help_info_with_stability_tag(
                 "Enable attention data parallel.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--enable_chunked_prefill",
@@ -161,7 +147,6 @@ def add_serve_options(*,
             default=False,
             help=help_info_with_stability_tag(
                 "Enable chunked prefill", "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--disagg_cluster_uri",
@@ -169,7 +154,6 @@ def add_serve_options(*,
             default=None,
             help=help_info_with_stability_tag(
                 "URI of the disaggregated cluster.", "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--otlp_traces_endpoint",
@@ -178,7 +162,6 @@ def add_serve_options(*,
             help=help_info_with_stability_tag(
                 "Target URL to which OpenTelemetry traces will be sent.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--fail_fast_on_attention_window_too_large",
@@ -189,7 +172,6 @@ def add_serve_options(*,
                 "to fit even a single sequence in the KV cache. Now defaults to True. "
                 "This flag only affects the TRT backend and will be removed in a future release.",
                 "deprecated"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--server_role",
@@ -201,7 +183,6 @@ def add_serve_options(*,
                 "MM_ENCODER=multimodal encoder, VISUAL_GEN=visual generation. "
                 "Required when using service registry.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--metadata_server_config_file",
@@ -209,7 +190,6 @@ def add_serve_options(*,
             default=None,
             help=help_info_with_stability_tag(
                 "Path to metadata server config file", "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--tool_parser",
@@ -217,7 +197,6 @@ def add_serve_options(*,
             default=None,
             help=help_info_with_stability_tag(
                 "Specify the parser for tool models.", "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--reasoning_parser",
@@ -225,7 +204,6 @@ def add_serve_options(*,
             default=None,
             help=help_info_with_stability_tag(
                 "Specify the parser for reasoning models.", "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--config",
@@ -237,7 +215,6 @@ def add_serve_options(*,
                 "Path to a YAML file that overwrites the parameters specified by trtllm-serve. "
                 "Can be specified as either --config or --extra_llm_api_options.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--hf_revision",
@@ -250,7 +227,6 @@ def add_serve_options(*,
                 "(branch name, tag name, or commit id). "
                 "Prefer --hf_revision over --revision.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--trust_remote_code",
@@ -258,7 +234,6 @@ def add_serve_options(*,
             default=False,
             help=help_info_with_stability_tag(
                 "Flag for HF transformers.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--num_postprocess_workers",
@@ -268,7 +243,6 @@ def add_serve_options(*,
                 "Number of workers to postprocess raw responses "
                 "to comply with OpenAI protocol.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--kv_cache_dtype",
@@ -278,7 +252,6 @@ def add_serve_options(*,
                 "KV cache quantization dtype for PyTorch backend. "
                 "'auto' uses checkpoint/model metadata; explicit values force override.",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--free_gpu_memory_fraction",
@@ -289,7 +262,6 @@ def add_serve_options(*,
                 "Free GPU memory fraction reserved for KV Cache, "
                 "after allocating model weights and buffers.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--gpus_per_node",
@@ -298,7 +270,6 @@ def add_serve_options(*,
             help=help_info_with_stability_tag(
                 "Number of GPUs per node. Default to None, and it will be detected automatically.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--moe_cluster_parallel_size",
@@ -309,7 +280,6 @@ def add_serve_options(*,
                 "[Deprecated] Expert cluster parallelism size. "
                 "This option is no longer supported and will be removed in a future release.",
                 "deprecated"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--moe_expert_parallel_size",
@@ -318,7 +288,6 @@ def add_serve_options(*,
             default=None,
             help=help_info_with_stability_tag(
                 "expert parallelism size", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--context_parallel_size",
@@ -327,7 +296,6 @@ def add_serve_options(*,
             default=1,
             help=help_info_with_stability_tag(
                 "Context parallelism size.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--pipeline_parallel_size",
@@ -336,7 +304,6 @@ def add_serve_options(*,
             default=1,
             help=help_info_with_stability_tag(
                 "Pipeline parallelism size.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--tensor_parallel_size",
@@ -345,7 +312,6 @@ def add_serve_options(*,
             default=1,
             help=help_info_with_stability_tag(
                 "Tensor parallelism size.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--max_seq_len",
@@ -355,7 +321,6 @@ def add_serve_options(*,
                 "Maximum total length of one request, including prompt and outputs. "
                 "If unspecified, the value is deduced from the model config.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--max_num_tokens",
@@ -364,7 +329,6 @@ def add_serve_options(*,
             help=help_info_with_stability_tag(
                 "Maximum number of batched input tokens after padding is removed in each batch.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--max_batch_size",
@@ -373,7 +337,6 @@ def add_serve_options(*,
             help=help_info_with_stability_tag(
                 "Maximum number of requests that the engine can schedule.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--max_beam_width",
@@ -381,7 +344,6 @@ def add_serve_options(*,
             default=MAX_BEAM_WIDTH_DEFAULT,
             help=help_info_with_stability_tag(
                 "Maximum number of beams for beam search decoding.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--log_level",
@@ -389,7 +351,6 @@ def add_serve_options(*,
             default="info",
             help=help_info_with_stability_tag(
                 "The logging level.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--custom_module_dirs",
@@ -401,7 +362,6 @@ def add_serve_options(*,
             multiple=True,
             help=help_info_with_stability_tag(
                 "Paths to custom module directories to import.", "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--backend",
@@ -411,7 +371,6 @@ def add_serve_options(*,
             help=help_info_with_stability_tag(
                 "The backend to use to serve the model. Default is pytorch backend.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--port",
@@ -419,7 +378,6 @@ def add_serve_options(*,
             default=PORT_DEFAULT,
             help=help_info_with_stability_tag(
                 "Port of the server.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--host",
@@ -427,7 +385,6 @@ def add_serve_options(*,
             default=HOST_DEFAULT,
             help=help_info_with_stability_tag(
                 "Hostname of the server.", "beta"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--custom_tokenizer",
@@ -437,7 +394,6 @@ def add_serve_options(*,
                 "Custom tokenizer type: alias (e.g., 'deepseek_v32') or Python import path "
                 "(e.g., 'tensorrt_llm.tokenizer.deepseek_v32.DeepseekV32Tokenizer').",
                 "prototype"),
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--tokenizer",
@@ -447,21 +403,14 @@ def add_serve_options(*,
                 "Path or name of the tokenizer. When using the PyTorch backend, "
                 "this replaces the default HuggingFace tokenizer.",
                 "beta"),
-            option_cls=option_cls,
         )(command)
-        argument_kwargs = {"required": model_required, "type": str}
-        if argument_cls is not None:
-            argument_kwargs["cls"] = argument_cls
-        command = click.argument("model", **argument_kwargs)(command)
+        command = click.argument("model", required=model_required, type=str)(command)
         return command
 
     return decorator
 
 
-def add_mm_embedding_serve_options(
-        *, model_required: bool,
-        option_cls: type[click.Option] | None = None,
-        argument_cls: type[click.Argument] | None = None) -> Callable:
+def add_mm_embedding_serve_options(*, model_required: bool) -> Callable:
 
     def decorator(command: Callable) -> Callable:
         command = _option(
@@ -469,7 +418,6 @@ def add_mm_embedding_serve_options(
             type=str,
             default=None,
             help="Path to metadata server config file",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--tensor_parallel_size",
@@ -477,7 +425,6 @@ def add_mm_embedding_serve_options(
             type=int,
             default=1,
             help="Tensor parallelism size.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--free_gpu_memory_fraction",
@@ -485,7 +432,6 @@ def add_mm_embedding_serve_options(
             default=FREE_GPU_MEMORY_FRACTION_DEFAULT,
             help="Free GPU memory fraction reserved for KV Cache, "
             "after allocating model weights and buffers.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--hf_revision",
@@ -495,7 +441,6 @@ def add_mm_embedding_serve_options(
             default=None,
             help="The revision to use for the HuggingFace model "
             "(branch name, tag name, or commit id).",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--config",
@@ -505,14 +450,12 @@ def add_mm_embedding_serve_options(
             default=None,
             help="Path to a YAML file that overwrites the parameters specified by trtllm-serve. "
             "Prefer --config over --extra_encoder_options.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--trust_remote_code",
             is_flag=True,
             default=False,
             help="Flag for HF transformers.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--gpus_per_node",
@@ -520,54 +463,44 @@ def add_mm_embedding_serve_options(
             default=None,
             help="Number of GPUs per node. Default to None, and it will be "
             "detected automatically.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--max_num_tokens",
             type=int,
             default=MAX_NUM_TOKENS_MM_EMBEDDING_DEFAULT,
             help="Maximum number of batched input tokens after padding is removed in each batch.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--max_batch_size",
             type=int,
             default=MAX_BATCH_SIZE_DEFAULT,
             help="Maximum number of requests that the engine can schedule.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--log_level",
             type=click.Choice(LOG_LEVELS),
             default="info",
             help="The logging level.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--port",
             type=int,
             default=PORT_DEFAULT,
             help="Port of the server.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "--host",
             type=str,
             default=HOST_DEFAULT,
             help="Hostname of the server.",
-            option_cls=option_cls,
         )(command)
-        argument_kwargs = {"required": model_required, "type": str}
-        if argument_cls is not None:
-            argument_kwargs["cls"] = argument_cls
-        command = click.argument("model", **argument_kwargs)(command)
+        command = click.argument("model", required=model_required, type=str)(command)
         return command
 
     return decorator
 
 
-def add_disaggregated_options(
-        *, option_cls: type[click.Option] | None = None) -> Callable:
+def add_disaggregated_options() -> Callable:
 
     def decorator(command: Callable) -> Callable:
         command = _option(
@@ -576,7 +509,6 @@ def add_disaggregated_options(
             default=0,
             help="[Deprecated] The interval of logging metrics in seconds. "
             "This option is not connected to any functionality and will be removed in a future release.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "-l",
@@ -584,7 +516,6 @@ def add_disaggregated_options(
             type=click.Choice(LOG_LEVELS),
             default="info",
             help="The logging level.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "-r",
@@ -592,7 +523,6 @@ def add_disaggregated_options(
             type=int,
             default=180,
             help="Request timeout",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "-t",
@@ -600,7 +530,6 @@ def add_disaggregated_options(
             type=int,
             default=180,
             help="Server start timeout",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "-m",
@@ -608,7 +537,6 @@ def add_disaggregated_options(
             type=str,
             default=None,
             help="Path to metadata server config file",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "-c",
@@ -618,15 +546,13 @@ def add_disaggregated_options(
             type=str,
             default=None,
             help="Path to the disaggregated serving configuration YAML file.",
-            option_cls=option_cls,
         )(command)
         return command
 
     return decorator
 
 
-def add_disaggregated_mpi_worker_options(
-        *, option_cls: type[click.Option] | None = None) -> Callable:
+def add_disaggregated_mpi_worker_options() -> Callable:
 
     def decorator(command: Callable) -> Callable:
         command = _option(
@@ -634,7 +560,6 @@ def add_disaggregated_mpi_worker_options(
             type=click.Choice(LOG_LEVELS),
             default="info",
             help="The logging level.",
-            option_cls=option_cls,
         )(command)
         command = _option(
             "-c",
@@ -644,7 +569,6 @@ def add_disaggregated_mpi_worker_options(
             type=str,
             default=None,
             help="Path to the disaggregated serving configuration YAML file.",
-            option_cls=option_cls,
         )(command)
         return command
 
