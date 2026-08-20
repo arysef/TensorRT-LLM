@@ -1323,11 +1323,18 @@ class Gemma4ForCausalLM(SpecDecOneEngineForCausalLM[Gemma4TextModel, Gemma4TextC
         """Build context mask with causal + bidirectional for MM tokens.
 
         Returns a [extend_len, prefix_len + extend_len] mask where:
-        - The first `prefix_len` columns (cached/paged history) are True for
-          all rows. SWA window enforcement is delegated to the kernel's
-          window_left clip. Bidirectional MM across the prefix/extend
-          boundary is NOT supported here; callers must ensure chunk
-          boundaries do not split a multimodal block.
+        - The first `prefix_len` columns (cached/paged history) carry the
+          sliding-window clip themselves, computed on *absolute* positions.
+          They cannot delegate it to the kernel: FlashInfer's prefill plan
+          sets ``window_left = -1`` whenever ``custom_mask`` is supplied
+          (``flashinfer.py``: "Setting `window_left` to -1 for custom
+          attention mask is important. Else, FlashInfer proceeds to use SWA
+          regardless of attention_mask_data"), so a mask that leaves these
+          columns unconditionally True lets a sliding layer read arbitrarily
+          far back once a chunked multimodal prefill grows past the window.
+          Bidirectional MM across the prefix/extend boundary is NOT supported
+          here; callers must ensure chunk boundaries do not split a
+          multimodal block.
         - The last `extend_len` columns follow the original causal +
           (optional) sliding window + MM-bidirectional logic.
         """
@@ -1344,9 +1351,23 @@ class Gemma4ForCausalLM(SpecDecOneEngineForCausalLM[Gemma4TextModel, Gemma4TextC
         causal_mask = causal_mask.masked_fill(token_type_mask, True)
 
         if prefix_len > 0:
-            prefix_block = torch.ones(
-                extend_len, prefix_len, dtype=causal_mask.dtype, device=device
-            )
+            # Rows are absolute positions ``prefix_len + r``; prefix columns are
+            # absolute positions ``c``. Same window predicate the extend block
+            # uses (``c > r_abs - window``), just expressed across the boundary.
+            if (
+                effective_sliding_window is not None
+                and effective_sliding_window <= prefix_len + extend_len - 1
+            ):
+                row_abs = torch.arange(prefix_len, prefix_len + extend_len, device=device)
+                col_abs = torch.arange(prefix_len, device=device)
+                prefix_block = (
+                    col_abs.unsqueeze(0) > row_abs.unsqueeze(1) - effective_sliding_window
+                )
+                prefix_block = prefix_block.to(causal_mask.dtype)
+            else:
+                prefix_block = torch.ones(
+                    extend_len, prefix_len, dtype=causal_mask.dtype, device=device
+                )
             causal_mask = torch.cat([prefix_block, causal_mask], dim=1)
 
         return causal_mask

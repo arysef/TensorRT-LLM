@@ -48,6 +48,62 @@ l0_dgx_h200:
   - disaggregated/test_disaggregated.py::test_disaggregated_mixed_stress_test[req120-conc64-qwen3_32b_fp8_mixed_stress]
   - unittest/llmapi/test_llm_pytorch.py::test_nemotron_nas_lora
   - accuracy/test_disaggregated_serving.py::TestDeepSeekV3Lite::test_gen_only_spec_dec
+  # ---- Gemma 4 26B-A4B BF16 on a single H200 (SM90) ----
+  # Single-GPU (tp_size=1) nodes.  They live in this condition because it is
+  # the only H200 PyTorch test-list condition, exactly like the single-GPU
+  # test_nemotron_nas_lora entry above.  Each node covers both runtime
+  # matrices: [cg0_ovl0] = (cuda_graph=false, overlap_scheduler=false),
+  # [cg1_ovl1] = (cuda_graph=true, overlap_scheduler=true).
+  - accuracy/test_gemma4_h200.py::TestGemma4H200ReferenceHelpers::test_metric_zero_norm_is_not_a_free_pass
+  - accuracy/test_gemma4_h200.py::TestGemma4H200ReferenceHelpers::test_contiguous_image_runs_are_measured_not_assumed
+  # Guards the generation-parity failure diagnostic: the teacher-forced argmax
+  # is only evidence of a reproducible divergence when it lands on the
+  # *TensorRT-LLM* token, not merely off the source's.
+  - accuracy/test_gemma4_h200.py::TestGemma4H200ReferenceHelpers::test_teacher_forced_outcome_requires_the_trtllm_token
+  # Pins both edges of criterion 6's human-amended tie exemption: the window is
+  # 2 bfloat16 ULP of the reference's own top-1 magnitude, it scales with
+  # magnitude rather than being an absolute logit tolerance, and a token outside
+  # the reference's top-2 is never exempt.
+  - accuracy/test_gemma4_h200.py::TestGemma4H200ReferenceHelpers::test_reference_tie_is_bounded_by_the_format_not_by_the_data
+  # Guards the post-tie recovery's forcing mechanism: the recorded logit row
+  # must be the model's own (taken before the rewrite) while the rewrite still
+  # reaches the sampler through the engine's logits view, so the recovery stays
+  # a real cached decode instead of a comparison against a row this file wrote.
+  - accuracy/test_gemma4_h200.py::TestGemma4H200ReferenceHelpers::test_forced_decode_records_the_model_row_and_pins_the_argmax
+  # Fast dummy-weight regression for the two H200 CUDA-graph defects fixed
+  # alongside these nodes: FlashInfer dereferencing KVCacheManagerV2's
+  # BAD_PAGE_INDEX placeholders, and graph replay running against a deferred
+  # (never refreshed) FlashInfer plan.  Minutes, not a full-checkpoint load.
+  - unittest/_torch/modeling/test_gemma4_e2e_dummy.py::test_e2e_text_26b_dummy_cuda_graph_past_sliding_window[ovl0] TIMEOUT (20)
+  - unittest/_torch/modeling/test_gemma4_e2e_dummy.py::test_e2e_text_26b_dummy_cuda_graph_past_sliding_window[ovl1] TIMEOUT (20)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_native_bf16_load_and_dispatch[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_native_bf16_load_and_dispatch[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_checkpoint_scale_attention_matrix[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_checkpoint_scale_attention_matrix[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_chunked_prefill_long_horizon[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_chunked_prefill_long_horizon[cg1_ovl1] TIMEOUT (60)
+  # Guards the deterministic MoE epilogue: with the CUTLASS FC2+finalize fusion
+  # on, repeats of one request through one engine returned different logits
+  # (nondeterministic for top-k > 2; Gemma 4 routes top-k 8), which flips greedy
+  # tokens and quietly costs accuracy.
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_decode_is_bitwise_reproducible[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Runtime::test_decode_is_bitwise_reproducible[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_source_activation_replay[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_source_activation_replay[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_moe_source_activation_replay[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_moe_source_activation_replay[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_source_logit_replay[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_source_logit_replay[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_generation_parity[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Parity::test_generation_parity[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmlu_canary[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmlu_canary[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmlu_bf16[cg0_ovl0] TIMEOUT (120)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmlu_bf16[cg1_ovl1] TIMEOUT (120)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmmu_canary[cg0_ovl0] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmmu_canary[cg1_ovl1] TIMEOUT (60)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmmu_bf16[cg0_ovl0] TIMEOUT (120)
+  - accuracy/test_gemma4_h200.py::TestGemma4H200Accuracy::test_mmmu_bf16[cg1_ovl1] TIMEOUT (120)
 - condition:
     ranges:
       system_gpu_count:
