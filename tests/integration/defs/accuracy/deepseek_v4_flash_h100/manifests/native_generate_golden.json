@@ -1,0 +1,1057 @@
+{
+  "checkpoint": "/models/DeepSeek-V4-Flash",
+  "checkpoint_revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+  "decoding": {
+    "do_sample": false,
+    "eos_token_id": 1,
+    "max_new_tokens": 32,
+    "num_beams": 1,
+    "rule": "deterministic greedy",
+    "sampling": false,
+    "temperature": 0,
+    "top_k": 1,
+    "use_cache": true
+  },
+  "evidence_label": "native_generate_golden",
+  "non_gating_prompt_ids": [
+    "chat_arithmetic"
+  ],
+  "non_gating_reason": "The two reference implementations compute the LM head at different precision: the checkpoint official inference/model.py ParallelHead keeps lm_head in FP32 and computes F.linear(x.float(), weight_fp32), while transformers DeepseekV4ForCausalLM.lm_head is a BF16 nn.Linear. At step 0 of this prompt three candidate tokens sit within ~0.1 logit of each other, which is under one BF16 step at that magnitude, so the two heads rank them differently and the greedy continuations fork. Both answers are coherent. This prompt is recorded and compared but does not gate; the second plain_chat prompt (chat_geography) and the four other prompts carry the token-for-token requirement. Non-gating status was declared explicitly rather than by omission so the divergence stays visible in the evidence.",
+  "prompts": {
+    "cache_boundary_257": {
+      "category": "cache_boundary",
+      "elapsed_s": 18.87,
+      "min_top1_top2_margin": 2.25,
+      "num_generated": 26,
+      "num_prompt_tokens": 257,
+      "rendered_sha256": "bc2504189f62e332bd099054d86d9587fef6e141e6d1fa3b02135aff6a2606db",
+      "thinking_mode": "chat",
+      "tokens": [
+        671,
+        14108,
+        56725,
+        270,
+        10175,
+        582,
+        671,
+        23809,
+        16429,
+        1950,
+        56725,
+        566,
+        10175,
+        832,
+        270,
+        852,
+        27472,
+        4892,
+        344,
+        73615,
+        305,
+        104914,
+        3881,
+        12122,
+        2148,
+        1
+      ],
+      "top1_top2_margin": [
+        15.5,
+        17.125,
+        2.25,
+        6.25,
+        5.75,
+        4.0,
+        8.75,
+        17.125,
+        15.875,
+        17.0,
+        13.75,
+        14.5,
+        14.0,
+        16.125,
+        16.125,
+        14.0,
+        15.5,
+        17.75,
+        17.75,
+        15.625,
+        17.625,
+        16.5,
+        15.875,
+        16.0,
+        3.25,
+        3.75
+      ],
+      "top2_candidates": [
+        [
+          671,
+          35
+        ],
+        [
+          14108,
+          33164
+        ],
+        [
+          56725,
+          28131
+        ],
+        [
+          270,
+          260
+        ],
+        [
+          10175,
+          17132
+        ],
+        [
+          582,
+          28
+        ],
+        [
+          671,
+          1805
+        ],
+        [
+          23809,
+          10524
+        ],
+        [
+          16429,
+          6556
+        ],
+        [
+          1950,
+          8499
+        ],
+        [
+          56725,
+          1613
+        ],
+        [
+          566,
+          270
+        ],
+        [
+          10175,
+          832
+        ],
+        [
+          832,
+          304
+        ],
+        [
+          270,
+          396
+        ],
+        [
+          852,
+          35204
+        ],
+        [
+          27472,
+          16722
+        ],
+        [
+          4892,
+          19772
+        ],
+        [
+          344,
+          305
+        ],
+        [
+          73615,
+          59347
+        ],
+        [
+          305,
+          1
+        ],
+        [
+          104914,
+          90589
+        ],
+        [
+          3881,
+          2148
+        ],
+        [
+          12122,
+          2632
+        ],
+        [
+          2148,
+          4
+        ],
+        [
+          1,
+          4990
+        ]
+      ]
+    },
+    "chat_arithmetic": {
+      "category": "plain_chat",
+      "elapsed_s": 16.68,
+      "min_top1_top2_margin": 0.0,
+      "num_generated": 2,
+      "num_prompt_tokens": 11,
+      "rendered_sha256": "5b58c5ffab7c6caed96091eae32a6aae813ab8014907fb035585d968d5bd76ed",
+      "thinking_mode": "chat",
+      "tokens": [
+        22,
+        1
+      ],
+      "top1_top2_margin": [
+        0.0,
+        4.875
+      ],
+      "top2_candidates": [
+        [
+          671,
+          22
+        ],
+        [
+          1,
+          16
+        ]
+      ]
+    },
+    "chat_geography": {
+      "category": "plain_chat",
+      "elapsed_s": 8.14,
+      "min_top1_top2_margin": 0.25,
+      "num_generated": 32,
+      "num_prompt_tokens": 16,
+      "rendered_sha256": "764f6695ca002ee17010bd4c8f5cfba686a24acbe52ecad274f05f57e772b518",
+      "thinking_mode": "chat",
+      "tokens": [
+        671,
+        6102,
+        294,
+        8760,
+        344,
+        11111,
+        16,
+        983,
+        344,
+        34161,
+        362,
+        1009,
+        32380,
+        63554,
+        14,
+        1345,
+        412,
+        270,
+        446,
+        4280,
+        317,
+        36788,
+        14,
+        305,
+        1009,
+        8954,
+        3980,
+        295,
+        2783,
+        14,
+        13556,
+        14
+      ],
+      "top1_top2_margin": [
+        8.0,
+        16.25,
+        15.25,
+        16.75,
+        19.125,
+        7.75,
+        5.25,
+        4.75,
+        9.0,
+        1.0,
+        3.75,
+        8.25,
+        2.75,
+        3.75,
+        0.25,
+        3.25,
+        19.5,
+        16.625,
+        14.25,
+        17.125,
+        18.875,
+        15.875,
+        0.5,
+        3.0,
+        2.0,
+        4.75,
+        2.75,
+        6.0,
+        15.0,
+        8.75,
+        0.75,
+        15.0
+      ],
+      "top2_candidates": [
+        [
+          671,
+          53624
+        ],
+        [
+          6102,
+          2619
+        ],
+        [
+          294,
+          344
+        ],
+        [
+          8760,
+          2619
+        ],
+        [
+          344,
+          2619
+        ],
+        [
+          11111,
+          2619
+        ],
+        [
+          16,
+          14
+        ],
+        [
+          983,
+          56983
+        ],
+        [
+          344,
+          734
+        ],
+        [
+          34161,
+          260
+        ],
+        [
+          362,
+          16531
+        ],
+        [
+          1009,
+          63554
+        ],
+        [
+          32380,
+          8954
+        ],
+        [
+          63554,
+          50508
+        ],
+        [
+          14,
+          1345
+        ],
+        [
+          1345,
+          8954
+        ],
+        [
+          412,
+          306
+        ],
+        [
+          270,
+          1805
+        ],
+        [
+          446,
+          2619
+        ],
+        [
+          4280,
+          394
+        ],
+        [
+          317,
+          574
+        ],
+        [
+          36788,
+          28757
+        ],
+        [
+          14,
+          305
+        ],
+        [
+          305,
+          2058
+        ],
+        [
+          1009,
+          344
+        ],
+        [
+          8954,
+          23788
+        ],
+        [
+          3980,
+          7267
+        ],
+        [
+          295,
+          412
+        ],
+        [
+          2783,
+          5785
+        ],
+        [
+          14,
+          305
+        ],
+        [
+          13556,
+          5785
+        ],
+        [
+          14,
+          305
+        ]
+      ]
+    },
+    "code_python_function": {
+      "category": "code",
+      "elapsed_s": 19.02,
+      "min_top1_top2_margin": 0.75,
+      "num_generated": 32,
+      "num_prompt_tokens": 24,
+      "rendered_sha256": "4fe9804a30e2fd39acf84916e267e671c0a2795bc7e798c8e42cbe808b8669f4",
+      "thinking_mode": "chat",
+      "tokens": [
+        9544,
+        734,
+        260,
+        15255,
+        2019,
+        396,
+        10340,
+        270,
+        313,
+        7784,
+        26509,
+        1167,
+        17162,
+        5757,
+        979,
+        9854,
+        36490,
+        201,
+        3465,
+        55155,
+        3913,
+        3395,
+        361,
+        16786,
+        361,
+        20870,
+        270,
+        313,
+        7784,
+        26509,
+        1167,
+        1812
+      ],
+      "top1_top2_margin": [
+        7.0,
+        5.0,
+        5.0,
+        5.75,
+        12.0,
+        6.75,
+        1.25,
+        12.25,
+        6.5,
+        7.25,
+        12.75,
+        14.0,
+        0.75,
+        19.125,
+        3.75,
+        17.0,
+        18.25,
+        17.625,
+        14.75,
+        6.25,
+        2.5,
+        2.75,
+        16.625,
+        3.75,
+        16.25,
+        2.75,
+        16.875,
+        8.75,
+        18.25,
+        11.5,
+        18.0,
+        1.25
+      ],
+      "top2_candidates": [
+        [
+          9544,
+          9854
+        ],
+        [
+          734,
+          442
+        ],
+        [
+          260,
+          411
+        ],
+        [
+          15255,
+          6219
+        ],
+        [
+          2019,
+          9963
+        ],
+        [
+          396,
+          304
+        ],
+        [
+          10340,
+          89946
+        ],
+        [
+          270,
+          1539
+        ],
+        [
+          313,
+          48941
+        ],
+        [
+          7784,
+          43360
+        ],
+        [
+          26509,
+          2619
+        ],
+        [
+          1167,
+          17162
+        ],
+        [
+          17162,
+          1812
+        ],
+        [
+          5757,
+          724
+        ],
+        [
+          979,
+          418
+        ],
+        [
+          9854,
+          5230
+        ],
+        [
+          36490,
+          24847
+        ],
+        [
+          201,
+          2143
+        ],
+        [
+          3465,
+          1897
+        ],
+        [
+          55155,
+          48941
+        ],
+        [
+          3913,
+          66895
+        ],
+        [
+          3395,
+          28
+        ],
+        [
+          361,
+          262
+        ],
+        [
+          16786,
+          26495
+        ],
+        [
+          361,
+          262
+        ],
+        [
+          20870,
+          27669
+        ],
+        [
+          270,
+          313
+        ],
+        [
+          313,
+          48941
+        ],
+        [
+          7784,
+          43360
+        ],
+        [
+          26509,
+          1167
+        ],
+        [
+          1167,
+          3737
+        ],
+        [
+          1812,
+          343
+        ]
+      ]
+    },
+    "long_prefill_2304": {
+      "category": "long_prefill",
+      "elapsed_s": 8.28,
+      "min_top1_top2_margin": 0.75,
+      "num_generated": 27,
+      "num_prompt_tokens": 2304,
+      "rendered_sha256": "f2b055f288e1304de869afe3a73c7a777f48348b94199015a4ad26fdcd4c2a95",
+      "thinking_mode": "chat",
+      "tokens": [
+        671,
+        14108,
+        28131,
+        5756,
+        396,
+        270,
+        23809,
+        16429,
+        1950,
+        56725,
+        260,
+        3549,
+        10175,
+        304,
+        5261,
+        270,
+        852,
+        27472,
+        4892,
+        344,
+        73615,
+        305,
+        104914,
+        3881,
+        12122,
+        16,
+        1
+      ],
+      "top1_top2_margin": [
+        8.875,
+        11.25,
+        0.75,
+        7.25,
+        4.0,
+        3.25,
+        9.5,
+        16.0,
+        18.625,
+        5.5,
+        2.75,
+        3.0,
+        15.625,
+        9.25,
+        3.25,
+        2.0,
+        12.75,
+        15.0,
+        17.875,
+        3.5,
+        8.0,
+        15.0,
+        14.875,
+        8.5,
+        8.5,
+        3.125,
+        15.125
+      ],
+      "top2_candidates": [
+        [
+          671,
+          666
+        ],
+        [
+          14108,
+          5221
+        ],
+        [
+          28131,
+          12005
+        ],
+        [
+          5756,
+          16428
+        ],
+        [
+          396,
+          270
+        ],
+        [
+          270,
+          582
+        ],
+        [
+          23809,
+          6425
+        ],
+        [
+          16429,
+          52051
+        ],
+        [
+          1950,
+          7958
+        ],
+        [
+          56725,
+          6623
+        ],
+        [
+          260,
+          270
+        ],
+        [
+          3549,
+          10175
+        ],
+        [
+          10175,
+          17132
+        ],
+        [
+          304,
+          4990
+        ],
+        [
+          5261,
+          1635
+        ],
+        [
+          270,
+          260
+        ],
+        [
+          852,
+          35204
+        ],
+        [
+          27472,
+          10203
+        ],
+        [
+          4892,
+          7926
+        ],
+        [
+          344,
+          7926
+        ],
+        [
+          73615,
+          11055
+        ],
+        [
+          305,
+          14
+        ],
+        [
+          104914,
+          36087
+        ],
+        [
+          3881,
+          16
+        ],
+        [
+          12122,
+          4990
+        ],
+        [
+          16,
+          14
+        ],
+        [
+          1,
+          343
+        ]
+      ]
+    },
+    "reasoning_word_problem": {
+      "category": "reasoning",
+      "elapsed_s": 19.14,
+      "min_top1_top2_margin": 1.25,
+      "num_generated": 32,
+      "num_prompt_tokens": 44,
+      "rendered_sha256": "2e336bd20922cb6f8699358f938edca373f106d23c97eb78896889523cd52090",
+      "thinking_mode": "thinking",
+      "tokens": [
+        2581,
+        477,
+        4869,
+        28,
+        582,
+        35,
+        9251,
+        9120,
+        509,
+        223,
+        3130,
+        28,
+        856,
+        305,
+        44495,
+        509,
+        223,
+        907,
+        28,
+        1484,
+        16,
+        983,
+        26012,
+        13796,
+        362,
+        223,
+        736,
+        4786,
+        1660,
+        16,
+        1730,
+        1606
+      ],
+      "top1_top2_margin": [
+        12.25,
+        1.25,
+        1.25,
+        16.0,
+        7.5,
+        14.25,
+        19.75,
+        20.125,
+        21.0,
+        22.125,
+        17.75,
+        16.25,
+        17.875,
+        21.375,
+        11.25,
+        17.125,
+        16.75,
+        18.0,
+        16.75,
+        19.375,
+        17.25,
+        19.5,
+        19.25,
+        17.5,
+        20.125,
+        17.5,
+        21.0,
+        18.125,
+        22.0,
+        17.5,
+        19.375,
+        17.375
+      ],
+      "top2_candidates": [
+        [
+          2581,
+          671
+        ],
+        [
+          477,
+          1309
+        ],
+        [
+          4869,
+          2910
+        ],
+        [
+          28,
+          304
+        ],
+        [
+          582,
+          334
+        ],
+        [
+          35,
+          334
+        ],
+        [
+          9251,
+          1022
+        ],
+        [
+          9120,
+          6559
+        ],
+        [
+          509,
+          223
+        ],
+        [
+          223,
+          905
+        ],
+        [
+          3130,
+          27
+        ],
+        [
+          28,
+          16
+        ],
+        [
+          856,
+          1883
+        ],
+        [
+          305,
+          44495
+        ],
+        [
+          44495,
+          3522
+        ],
+        [
+          509,
+          223
+        ],
+        [
+          223,
+          907
+        ],
+        [
+          907,
+          929
+        ],
+        [
+          28,
+          16
+        ],
+        [
+          1484,
+          1328
+        ],
+        [
+          16,
+          2148
+        ],
+        [
+          983,
+          455
+        ],
+        [
+          26012,
+          370
+        ],
+        [
+          13796,
+          362
+        ],
+        [
+          362,
+          16642
+        ],
+        [
+          223,
+          736
+        ],
+        [
+          736,
+          553
+        ],
+        [
+          4786,
+          10317
+        ],
+        [
+          1660,
+          17415
+        ],
+        [
+          16,
+          2148
+        ],
+        [
+          1730,
+          3016
+        ],
+        [
+          1606,
+          1623
+        ]
+      ]
+    }
+  },
+  "provenance": {
+    "attn_implementation": "eager",
+    "checkpoint_bytes": "unmodified; loaded through transformers' own deepseek_v4 weight-conversion mapping and FP8/MXFP4 quantizer",
+    "conversion_code": "none -- no remap, dequantization or shim applied",
+    "conversion_code_sha256": "918016e12dcb10b5487d71236ec454b15fcf684f458ac0ed3c7082507c6e0a91",
+    "device_map": "auto",
+    "devices": "8 x NVIDIA H100 80GB HBM3",
+    "generated_utc": "2026-08-21T13:11:34Z",
+    "generator": "AutoModelForCausalLM.generate(do_sample=False)",
+    "generator_code": "tests/integration/defs/accuracy/deepseek_v4_flash_h100/hf_native_golden.py",
+    "isolated_env": "/cache/dsv4_flash_h100/goldenenv",
+    "load_seconds": 106.3,
+    "parameter_dtypes": {
+      "torch.bfloat16": 425,
+      "torch.float32": 366,
+      "torch.float8_e4m3fn": 365,
+      "torch.float8_e8m0fnu": 451,
+      "torch.int8": 86
+    },
+    "prompts_manifest_sha256": "3927fee884f1949eac2812a8d5f23266459c13250ae08d761e38dae6abb21b0e",
+    "quantized_module_classes": {
+      "FP8Experts": 43,
+      "FP8GroupedLinear": 43,
+      "FP8Linear": 322
+    },
+    "torch_version": "2.12.0a0+5aff3928d8.nv26.05",
+    "transformers_path": "/cache/dsv4_flash_h100/goldenenv/lib/python3.12/site-packages/transformers",
+    "transformers_version": "5.15.1"
+  },
+  "reference_tier": "real_source",
+  "required_prompt_ids": [
+    "cache_boundary_257",
+    "chat_geography",
+    "code_python_function",
+    "long_prefill_2304",
+    "reasoning_word_problem"
+  ],
+  "schema_version": 1,
+  "validation_tier": "integration"
+}

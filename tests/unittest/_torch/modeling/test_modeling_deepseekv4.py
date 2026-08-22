@@ -45,7 +45,11 @@ from tensorrt_llm._torch.models.modeling_deepseekv4 import (
     DeepseekV4Gate,
     DeepseekV4MTP,
     _copy_deepseek_v4_fused_a_weight_scale,
+    _deepseek_v4_local_expert_ids,
     _deepseek_v4_pos_embd_params,
+    _deepseek_v4_routed_moe_is_packed,
+    _deepseek_v4_routed_moe_scale_name,
+    _deepseek_v4_routed_quant_config,
     _normalize_deepseek_v4_nvfp4_mixed_precision_config,
     _remap_deepseek_v4_checkpoint_keys,
     _resolve_enable_fused_hc,
@@ -1413,3 +1417,252 @@ def test_fused_rope_context_positions(num_heads: int, cached_offset: int) -> Non
     )
     reference = _reference(q, cos_sin, positions.long(), num_heads)
     _assert_matches(quant_q, q_pe, reference, num_heads)
+
+
+# ---------------------------------------------------------------------------
+# Routed-expert loader boundary.
+#
+# The checkpoint stores one raw `.scale` per routed projection, and which model
+# key that becomes depends on the weight method the routed quant mode resolves
+# to, not on the container the bytes arrive in. The two disagree precisely on
+# Hopper: `W4A16_MXFP4` -> `WFP4A16FusedMoEMethod`, which reads
+# `weight_scale_inv`, while the SM100 `W4A8_MXFP4_*` methods read
+# `weight_scale`. Getting this wrong is a KeyError at load, not a silent
+# accuracy loss -- but keying the *uint8 view* off the same string would be
+# silent, so both halves are pinned here.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSafeSlice:
+    """A `safetensors` PySafeSlice: shape and dtype without reading the bytes."""
+
+    _TORCH_TO_ST = {torch.int8: "I8", torch.uint8: "U8", torch.float32: "F32"}
+
+    def __init__(self, tensor: torch.Tensor):
+        self._tensor = tensor
+        self.reads = 0
+
+    def get_shape(self):
+        return list(self._tensor.shape)
+
+    def get_dtype(self):
+        return self._TORCH_TO_ST[self._tensor.dtype]
+
+    def __getitem__(self, item):
+        self.reads += 1
+        return self._tensor[item]
+
+
+class _ExplodingSafeSlice(_FakeSafeSlice):
+    """A slice whose bytes must never be touched."""
+
+    def __getitem__(self, item):
+        raise AssertionError("this expert belongs to another rank and must not be read")
+
+
+def _packed_expert_weights(expert_ids=(0,), lazy: bool = False, layer: int = 0):
+    weights = {}
+    for expert_id in expert_ids:
+        weight = torch.tensor([[-1, 2], [3, -4]], dtype=torch.int8)
+        scale = torch.tensor([[1, 2]], dtype=torch.int8)
+        prefix = f"layers.{layer}.ffn.experts.{expert_id}"
+        weights[f"{prefix}.w1.weight"] = _FakeSafeSlice(weight) if lazy else weight
+        weights[f"{prefix}.w1.scale"] = _FakeSafeSlice(scale) if lazy else scale
+    return weights
+
+
+def _quant_config(algo: QuantAlgo) -> QuantConfig:
+    return QuantConfig(quant_algo=algo, group_size=32)
+
+
+@pytest.mark.parametrize("lazy", [False, True], ids=["eager_int8", "lazy_I8"])
+def test_sm90_w4a16_mxfp4_routed_experts_remap_to_weight_scale_inv(lazy):
+    """`WFP4A16FusedMoEMethod.load_quant_scales` reads `weight_scale_inv`."""
+    remapped = _remap_deepseek_v4_checkpoint_keys(
+        _packed_expert_weights(lazy=lazy),
+        num_hidden_layers=1,
+        kv_lora_rank=448,
+        routed_quant_config=_quant_config(QuantAlgo.W4A16_MXFP4),
+    )
+
+    assert "model.layers.0.mlp.experts.0.w1.weight_scale_inv" in remapped
+    assert "model.layers.0.mlp.experts.0.w1.weight_scale" not in remapped
+    # Still the packed container: the view is gated on the container, not the
+    # spelling, so `weight_scale_inv` here must not mean "FP8 block scales".
+    assert remapped["model.layers.0.mlp.experts.0.w1.weight"].dtype == torch.uint8
+    assert remapped["model.layers.0.mlp.experts.0.w1.weight_scale_inv"].dtype == torch.uint8
+
+
+@pytest.mark.parametrize("lazy", [False, True], ids=["eager_int8", "lazy_I8"])
+@pytest.mark.parametrize(
+    "algo", [QuantAlgo.W4A8_MXFP4_FP8, QuantAlgo.W4A8_MXFP4_MXFP8], ids=["w4a8_fp8", "w4a8_mxfp8"]
+)
+def test_blackwell_mxfp4_routed_experts_keep_weight_scale(lazy, algo):
+    """`MXFP4WeightFusedMoEMethod.load_all_mxfp4_weight_scales` reads
+    `weight_scale`; the Hopper fix must not have moved the protected path."""
+    remapped = _remap_deepseek_v4_checkpoint_keys(
+        _packed_expert_weights(lazy=lazy),
+        num_hidden_layers=1,
+        kv_lora_rank=448,
+        routed_quant_config=_quant_config(algo),
+    )
+
+    assert "model.layers.0.mlp.experts.0.w1.weight_scale" in remapped
+    assert "model.layers.0.mlp.experts.0.w1.weight_scale_inv" not in remapped
+    assert remapped["model.layers.0.mlp.experts.0.w1.weight"].dtype == torch.uint8
+
+
+def test_the_container_is_detected_the_same_way_lazy_or_not():
+    eager = _packed_expert_weights(lazy=False)
+    lazy = _packed_expert_weights(lazy=True)
+
+    assert _deepseek_v4_routed_moe_is_packed(eager, "layers.")
+    assert _deepseek_v4_routed_moe_is_packed(lazy, "layers.")
+    assert not _deepseek_v4_routed_moe_is_packed(
+        {"layers.0.ffn.experts.0.w1.weight": torch.zeros((2, 2), dtype=torch.float32)},
+        "layers.",
+    )
+
+
+def test_unpacked_routed_experts_ignore_the_quant_mode():
+    """FP8 block-scale routed experts are `weight_scale_inv` under either mode;
+    the mode only chooses between the two packed-MXFP4 spellings."""
+    for algo in (QuantAlgo.W4A16_MXFP4, QuantAlgo.W4A8_MXFP4_MXFP8, None):
+        config = _quant_config(algo) if algo is not None else None
+        assert _deepseek_v4_routed_moe_scale_name(False, config) == "weight_scale_inv"
+
+
+def test_an_unknown_routed_mode_keeps_the_historical_container_answer():
+    """`routed_quant_config=None` is the DSpark draft remap and the focused
+    tests, which have no per-layer mode to consult."""
+    assert _deepseek_v4_routed_moe_scale_name(True, None) == "weight_scale"
+
+
+# ---------------------------------------------------------------------------
+# Rank-local streaming.
+# ---------------------------------------------------------------------------
+
+
+def test_foreign_expert_slices_are_never_read():
+    """The whole point of the filter: on a 149 GB checkpoint, reading the seven
+    eighths of routed experts this rank does not own is what exhausts host
+    memory. A dropped expert must not be touched, not merely discarded."""
+    weights = {}
+    local = torch.tensor([[-1, 2], [3, -4]], dtype=torch.int8)
+    weights["layers.0.ffn.experts.0.w1.weight"] = _FakeSafeSlice(local)
+    weights["layers.0.ffn.experts.0.w1.scale"] = _FakeSafeSlice(
+        torch.tensor([[1, 2]], dtype=torch.int8)
+    )
+    for foreign in (1, 2, 3):
+        prefix = f"layers.0.ffn.experts.{foreign}"
+        weights[f"{prefix}.w1.weight"] = _ExplodingSafeSlice(local)
+        weights[f"{prefix}.w1.scale"] = _ExplodingSafeSlice(local)
+
+    remapped = _remap_deepseek_v4_checkpoint_keys(
+        weights,
+        num_hidden_layers=1,
+        kv_lora_rank=448,
+        local_expert_ids={0},
+        routed_quant_config=_quant_config(QuantAlgo.W4A16_MXFP4),
+    )
+
+    assert sorted(remapped) == [
+        "model.layers.0.mlp.experts.0.w1.weight",
+        "model.layers.0.mlp.experts.0.w1.weight_scale_inv",
+    ]
+
+
+def test_local_expert_slices_are_read_once_and_handed_on_as_tensors():
+    """The shared `Linear`/`FusedMoE` loaders take tensors, not slices, so what
+    survives the filter is materialized here -- exactly once."""
+    weights = _packed_expert_weights(expert_ids=(0, 1), lazy=True)
+
+    remapped = _remap_deepseek_v4_checkpoint_keys(
+        weights,
+        num_hidden_layers=1,
+        kv_lora_rank=448,
+        local_expert_ids={1},
+        routed_quant_config=_quant_config(QuantAlgo.W4A16_MXFP4),
+    )
+
+    assert all(isinstance(value, torch.Tensor) for value in remapped.values())
+    assert weights["layers.0.ffn.experts.1.w1.weight"].reads == 1
+    assert weights["layers.0.ffn.experts.1.w1.scale"].reads == 1
+    assert weights["layers.0.ffn.experts.0.w1.weight"].reads == 0
+
+
+def test_no_filter_is_applied_when_the_rank_owns_every_expert():
+    weights = _packed_expert_weights(expert_ids=(0, 1, 2), lazy=True)
+
+    remapped = _remap_deepseek_v4_checkpoint_keys(
+        weights, num_hidden_layers=1, kv_lora_rank=448, local_expert_ids=None
+    )
+
+    assert len(remapped) == 6
+
+
+def _mapping_config(moe_ep_size: int, n_routed_experts: int = 8, **extra):
+    config = DeepseekV4Config(num_hidden_layers=1, n_routed_experts=n_routed_experts)
+    mapping = Mapping(
+        world_size=moe_ep_size,
+        rank=moe_ep_size - 1,
+        tp_size=moe_ep_size,
+        moe_ep_size=moe_ep_size,
+        moe_tp_size=1,
+    )
+    model_config = ModelConfig(pretrained_config=config, mapping=mapping)
+    for name, value in extra.items():
+        setattr(model_config, name, value)
+    return model_config
+
+
+def test_local_expert_ids_are_this_ranks_contiguous_ep_slice():
+    model_config = _mapping_config(moe_ep_size=4, n_routed_experts=8)
+    assert _deepseek_v4_local_expert_ids(model_config) == {6, 7}
+
+
+def test_no_expert_parallelism_means_no_filter():
+    """Without EP the rank owns every expert, and filtering would drop needed
+    ones."""
+    assert _deepseek_v4_local_expert_ids(_mapping_config(moe_ep_size=1)) is None
+
+
+def test_a_load_balancer_disables_the_filter():
+    """A balancer reassigns slots, so the contiguous split is no longer the
+    set the rank will ask for. Not filtering is always safe; filtering wrong is
+    a missing-key failure at best."""
+    model_config = _mapping_config(moe_ep_size=4, moe_load_balancer=object())
+    assert _deepseek_v4_local_expert_ids(model_config) is None
+
+
+def test_an_indivisible_expert_count_disables_the_filter():
+    assert _deepseek_v4_local_expert_ids(_mapping_config(moe_ep_size=4, n_routed_experts=6)) is None
+
+
+def test_the_routed_quant_config_is_the_one_the_moe_layers_resolve():
+    experts = _quant_config(QuantAlgo.W4A16_MXFP4)
+    model_config = ModelConfig(
+        pretrained_config=DeepseekV4Config(num_hidden_layers=2),
+        quant_config=_quant_config(QuantAlgo.FP8_BLOCK_SCALES),
+        quant_config_dict={
+            "model.layers.0.mlp.experts": experts,
+            "model.layers.1.mlp.experts": experts,
+        },
+    )
+
+    assert _deepseek_v4_routed_quant_config(model_config).quant_algo == QuantAlgo.W4A16_MXFP4
+
+
+def test_routed_layers_disagreeing_on_the_quant_algo_is_rejected():
+    """One shard, one scale spelling. Picking either silently would mis-key
+    half the layers."""
+    model_config = ModelConfig(
+        pretrained_config=DeepseekV4Config(num_hidden_layers=2),
+        quant_config_dict={
+            "model.layers.0.mlp.experts": _quant_config(QuantAlgo.W4A16_MXFP4),
+            "model.layers.1.mlp.experts": _quant_config(QuantAlgo.W4A8_MXFP4_MXFP8),
+        },
+    )
+
+    with pytest.raises(ValueError, match="more than one quant algo"):
+        _deepseek_v4_routed_quant_config(model_config)

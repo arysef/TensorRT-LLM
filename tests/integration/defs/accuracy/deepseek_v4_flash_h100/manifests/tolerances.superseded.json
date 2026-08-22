@@ -1,0 +1,346 @@
+{
+  "checkpoint_revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+  "gates": {
+    "cuda_graph_matrix": {
+      "configurations": [
+        {
+          "cuda_graph": false,
+          "overlap_scheduler": false
+        },
+        {
+          "cuda_graph": true,
+          "overlap_scheduler": true
+        }
+      ],
+      "requires": [
+        "enabled configuration proves capture and >=2 replays for every required V4 operator",
+        "no eager fallback for any required operator",
+        "baseline and enabled both meet the gates above"
+      ]
+    },
+    "generation_parity": {
+      "min_new_tokens": 32,
+      "min_prompts": 5,
+      "requires": [
+        "per-step greedy token equality against the source at every step",
+        "two TensorRT-LLM repetitions produce identical token sequences",
+        "non-empty output, no NaN/Inf logits"
+      ]
+    },
+    "source_activation_replay": {
+      "layers": [
+        0,
+        2,
+        3
+      ],
+      "phases": [
+        "prefill",
+        "cached_decode"
+      ],
+      "requires": [
+        "cosine >= per-module cosine_min",
+        "rel_max_abs <= per-module rel_max_abs_max where one is registered",
+        "sparse_attention_output and attention_sink within BF16 storage resolution: abs_max_element_steps <= 1.0, elements_beyond_one_step == 0, mean_abs_in_dtype_steps <= 1e-4",
+        "indexer_topk exact on ratio-4 layers",
+        "all values finite"
+      ]
+    },
+    "source_logit_replay": {
+      "min_prompts": 5,
+      "requires": [
+        "greedy argmax token equals the source token for every prompt",
+        "final_logits cosine >= 0.99",
+        "all logits finite"
+      ]
+    }
+  },
+  "modules": {
+    "attention_sink": {
+      "cosine_min": 0.999,
+      "description": "FP32 per-head sink contributing denominator mass only.",
+      "rel_max_abs_max": 0.03
+    },
+    "compressor": {
+      "cosine_min": 0.999,
+      "description": "FP32 learned gated pooling; overlapping for ratio 4, non-overlapping for ratio 128; post-pool norm, RoPE and quantisation simulation.",
+      "rel_max_abs_max": 0.03
+    },
+    "compressor_state": {
+      "cosine_min": 0.999,
+      "description": "Retained kv_state / score_state buffers across an incomplete compression group.",
+      "rel_max_abs_max": 0.03
+    },
+    "decoder_layer": {
+      "cosine_min": 0.99,
+      "description": "One complete decoder layer including mHC and MoE.",
+      "rel_max_abs_max": 0.05
+    },
+    "final_logits": {
+      "argmax_rule": "exact",
+      "cosine_min": 0.99,
+      "description": "Full-model next-token logits over the 129280-entry vocabulary.",
+      "rel_max_abs_max": 0.05
+    },
+    "indexer_scores": {
+      "cosine_min": 0.995,
+      "description": "Weighted 64-head ReLU score reduction over compressed slots.",
+      "rel_max_abs_max": 0.05
+    },
+    "indexer_topk": {
+      "description": "Selected compressed slots on ratio-4 layers.",
+      "detail": "Selected index set must equal the source set exactly. The score margin between the last selected and first rejected slot is reported as a diagnostic but never used to waive a mismatch.",
+      "rule": "exact"
+    },
+    "inverse_rope": {
+      "cosine_min": 0.9999,
+      "description": "Inverse RoPE applied to attention output before grouped O-LoRA.",
+      "rel_max_abs_max": 0.01
+    },
+    "kv_latent_and_norm": {
+      "cosine_min": 0.9995,
+      "description": "wkv -> full-width kv_norm(512) latent projection.",
+      "rel_max_abs_max": 0.02
+    },
+    "mhc": {
+      "cosine_min": 0.999,
+      "description": "Sinkhorn-normalised hyper-connection pre/post mixing, FP32 mix parameters over BF16 residual streams.",
+      "rel_max_abs_max": 0.03
+    },
+    "moe_combined_output": {
+      "cosine_min": 0.999,
+      "description": "Routed plus shared expert output combined once.",
+      "rel_max_abs_max": 0.04
+    },
+    "moe_expert_ids": {
+      "description": "Selected top-6 experts (hash-routed layers 0-2 and score-routed layers 3-42).",
+      "rule": "exact"
+    },
+    "moe_expert_output": {
+      "cosine_min": 0.999,
+      "description": "Routed FC1 -> SwiGLU with clamp 10 -> FC2, through the packed MXFP4 path.",
+      "rel_max_abs_max": 0.04
+    },
+    "moe_router_logits": {
+      "cosine_min": 0.999,
+      "description": "sqrt-softplus routing scores before bias.",
+      "rel_max_abs_max": 0.02
+    },
+    "moe_routing_weights": {
+      "cosine_min": 0.999,
+      "description": "Normalised routing weights after route_scale 1.5, gathered from the pre-bias scores.",
+      "rel_max_abs_max": 0.02
+    },
+    "o_lora_output": {
+      "cosine_min": 0.999,
+      "description": "Grouped wo_a then row-parallel wo_b back to 4096.",
+      "rel_max_abs_max": 0.03
+    },
+    "q_projection_and_norm": {
+      "cosine_min": 0.9995,
+      "description": "wq_a -> RMSNorm(1024) -> wq_b, then per-head 512-wide RMS normalisation.",
+      "rel_max_abs_max": 0.02
+    },
+    "rope": {
+      "cosine_min": 0.9999,
+      "description": "RoPE on the final 64 dims; theta 10000 no-YaRN for ratio-0, theta 160000 + YaRN factor 16 for compressed layers.",
+      "rel_max_abs_max": 0.01
+    },
+    "sparse_attention_output": {
+      "cosine_min": 0.999,
+      "description": "512-wide latent attention output over the dual-pool (SWA + compressed) selection.",
+      "rel_max_abs_max": 0.03
+    }
+  },
+  "original_file_sha256": "7641c45bd21f91c6b0adc4d5a020a5d04e018b31bb828b98b9009df80fe8d6b2",
+  "rationale": {
+    "loosening_policy": "Float tolerances may only be loosened by re-registering this manifest and recording the change in progress.yaml with evidence. The 'exact' rules are inviolable: an index/route/argmax/token mismatch is a failure, never a tolerance question.",
+    "metric_definitions": {
+      "abs_max_element_steps": "The difference at the element with the largest absolute error, expressed in storage steps. That element is by definition the one that drives rel_max_abs, so this says whether the worst disagreement is a rounding of the stored value or a real arithmetic difference.",
+      "cosine": "1 - cosine distance between flattened reference and candidate, computed in float64.",
+      "elements_beyond_one_step": "Count of elements whose difference exceeds one storage step. Zero means the two implementations agree everywhere to the precision the output is stored in.",
+      "exact": "bitwise/id equality; not expressible as a float tolerance and never loosened.",
+      "max_abs": "max(|candidate - reference|), reported in absolute units.",
+      "mean_abs": "mean(|candidate - reference|), reported in absolute units.",
+      "mean_abs_in_dtype_steps": "Mean difference over all elements in storage steps; catches widespread sub-step drift that a maximum cannot see.",
+      "rel_max_abs": "max_abs divided by sqrt(mean(reference^2)); scale-free, so a tolerance cannot be silently satisfied by a small-magnitude tensor.",
+      "storage_step": "One step of the candidate dtype's representable grid at an element: max(|candidate|, |reference|) * finfo(dtype).eps, floored at rms(reference) * finfo(dtype).eps so the quantity stays a statement about the tensor's storage resolution rather than about relative precision at cancellation near-zeros."
+    },
+    "why_these_numbers": "Activations are BF16 (relative eps ~7.8e-3) and weights are FP8 E4M3 with 128x128 UE8M0 block scales, so a single GEMM already carries O(1e-2) relative error against an FP32 recomputation. Float tolerances are therefore set per module at roughly 2-4x the accumulated BF16/FP8 noise floor for that depth, while every discrete decision (Indexer top-k, expert ids, greedy argmax, generated tokens) is held to exact equality because a discrete mismatch is a semantic bug, not numerical drift."
+  },
+  "registered_before": "any TensorRT-LLM vs source measurement on this checkpoint",
+  "retention": {
+    "extracted_from": [
+      {
+        "artifact": "activation_replay_eager.iter17a.json",
+        "sha256": "ad43508b4702ea894f9914e31592a9bc881d9b28955a818970f0d4550c03110c"
+      },
+      {
+        "artifact": "activation_replay_eager.iter17b.json",
+        "sha256": "8f7027509c85817fcd868cdb014014e456e3cbe490b4d2b7bea1d10ea613edc4"
+      },
+      {
+        "artifact": "activation_replay_eager.iter17c.json",
+        "sha256": "5ad06e6d675e93f2ba3793f4f3d11224be6278b0a4138d79efdd6cc8d7af29ba"
+      },
+      {
+        "artifact": "activation_replay_eager.iter17d.json",
+        "sha256": "9338cb695ffdffc18f8d9ad8ef03cfb1a812af1cf30bdf7ca74c4273ee34fb27"
+      },
+      {
+        "artifact": "activation_replay_eager.iter18a.json",
+        "sha256": "2c7a04343f38ea5d974e3d8325657bb465ecaf93a46ec403ced1fde9f9071e3a"
+      },
+      {
+        "artifact": "activation_replay_eager.json",
+        "sha256": "4ec1762e2cd8bb028c54fe9b1a059b3e103795dda1a138eabdf0b9f40a79e55a"
+      },
+      {
+        "artifact": "activation_replay_eager.reviewer_iter15.json",
+        "sha256": "e40da3f9b52cfac1240494cd4edbf8f55b22e5a40fa532ce7e79865072d879e3"
+      },
+      {
+        "artifact": "activation_replay_eager.reviewer_iter16.json",
+        "sha256": "9462244c9764777edb051669637b7d6742146106cf3d71d7442faf1265a7977a"
+      },
+      {
+        "artifact": "activation_replay_reviewer_iter14.json",
+        "sha256": "769db386157e069e94efbed7470ad2d7d6c73d7921f5675738d322bbc7a0c369"
+      },
+      {
+        "artifact": "probe_iter6.json",
+        "sha256": "3c8319594a04db0ea366c1040147e68d533ade4e18ea2487dc65e5606dc184ee"
+      },
+      {
+        "artifact": "qa_iter20_activation_replay_eager.json",
+        "sha256": "231ce962fe5b2e8c8a464ba01d175bf489b9dbaecf36fd54b365cae0cca35bea"
+      },
+      {
+        "artifact": "qa_iter20_reference_ladder.json",
+        "sha256": "f820c8b970c04950ac072e6bfc993a74a1bc7113700cec1ad785fe9e30cba37d"
+      },
+      {
+        "artifact": "rankprobe.json",
+        "sha256": "d2d8c09d67cc891aacbced81b2f6ff30bdc3a5b5071debb32e76feb9be78077d"
+      },
+      {
+        "artifact": "reference_ladder.iter17.json",
+        "sha256": "aab446dc49cbb68804722e4bfd9a3e3da01c34667aab63b190a7e46e40b82d3b"
+      },
+      {
+        "artifact": "reference_ladder.json",
+        "sha256": "f10a1b26773d64b0efa74c6332976f9cfc92430617a33ae1ba10dc9c6e5bb614"
+      },
+      {
+        "artifact": "reference_ladder.tf32diag.json",
+        "sha256": "580bbbd6ce0a06de73d4115e1b3553689690a579e29c72bcf52195b2ab53c818"
+      },
+      {
+        "artifact": "reference_ladder_reviewer_iter5.json",
+        "sha256": "a8e878b1fc39aa86249e4150e3cbda72c5e816c5c73ada66fd8b4f7561c383ef"
+      },
+      {
+        "artifact": "reference_ladder_reviewer_iter6.json",
+        "sha256": "4dac61449ba7efce9e65f0d4e1a99d7aacda2d98203ae7b2613219f10d4ddeb3"
+      },
+      {
+        "artifact": "reference_ladder_reviewer_iter7.json",
+        "sha256": "80db6c4ab182c5208c82a21542dbd63c130117412a0619cb4ecbdfc79d932be5"
+      },
+      {
+        "artifact": "replay_dbg1.json",
+        "sha256": "5ab60745e772a8f4ceb90a091e875aba4bf2ed1f51db3d583aaa32c5ae380de7"
+      },
+      {
+        "artifact": "replay_dbg2.json",
+        "sha256": "876fc270e748edd4ba64c2eae180ddaf7087a6d6c078078e357d8d33da74fad9"
+      },
+      {
+        "artifact": "replay_rep1.json",
+        "sha256": "edde3cecaa344fe449c7b0d815690939799a79e2d034ad0f1c88c2e8b063d680"
+      },
+      {
+        "artifact": "replay_rep3.json",
+        "sha256": "5f53181fbb9c0013c61fa45d172fda835f3619263860d8344021b9bb5a9709fd"
+      },
+      {
+        "artifact": "replay_t1.json",
+        "sha256": "ac51ccd5fa7b9b41e2bd40fd885fecb988bc6284101c55c09b34fed141b542a1"
+      },
+      {
+        "artifact": "replay_t2.json",
+        "sha256": "be5517d8e3ce97a181ef41a75f3f3bd50aa30dc2fcf03ea3677fb13a851552b7"
+      },
+      {
+        "artifact": "replay_t3.json",
+        "sha256": "77a71fbe131f3ac5f13ed4f9263714c3a4ce48d6d556ecfadea975fb35dd9ecb"
+      },
+      {
+        "artifact": "replay_t4.json",
+        "sha256": "7bcf67774772fcee2fff87574fe87201933b8ccc7455480c3770e4664aa9a9c5"
+      },
+      {
+        "artifact": "replay_t5.json",
+        "sha256": "bf967f9edc4e20cd4b1dbcc92530b041dfe6ce3c52c6f0b84b12bb304d7807de"
+      },
+      {
+        "artifact": "reviewer17_activation_replay_eager.json",
+        "sha256": "3a6117c3c6dede523a73821b0867aaf87c0c68471c8f5783c0e06983350ac449"
+      },
+      {
+        "artifact": "reviewer17_reference_ladder.json",
+        "sha256": "f075ab0736fcf4f6593faf59f66eb57e13cc1be2e4ce0cdc0513a91fc3ad7b2c"
+      },
+      {
+        "artifact": "reviewer18_activation_replay_eager.json",
+        "sha256": "59124a3474c9573e4b9bafc5207ac88aadf948385b3839c7ab0869d19771beec"
+      },
+      {
+        "artifact": "reviewer_iter19_activation_replay_eager.json",
+        "sha256": "7ea0f47797a58cb5182c4d70b42c5104617f0ba52132469839230d2531f6f6bd"
+      },
+      {
+        "artifact": "reviewer_iter19_reference_ladder.json",
+        "sha256": "6daaf41115b9c870c9fabcfc0f9824baa51dedc731e6b1f43fbeb1de549cd3c4"
+      },
+      {
+        "artifact": "reviewer_iter20_activation_replay_eager.json",
+        "sha256": "c70ef23b4113f19bb9fabe9bf192e98e37b6c21b119e1ff57957b55fe8e07120"
+      },
+      {
+        "artifact": "reviewer_iter20_reference_ladder.json",
+        "sha256": "1caaffeec7e1696c95804390a50c11441730adf0c17b86b8b4b684e68ff5f0f6"
+      },
+      {
+        "artifact": "reviewer_reference_ladder_iter4.json",
+        "sha256": "88c60812bd7f3ff5eed636a4799753ca401664a5b3167432c0229a82e1327aa1"
+      }
+    ],
+    "module_sources": {
+      "attention_sink": "pre_registration_artifact",
+      "compressor": "pre_registration_artifact",
+      "compressor_state": "unchanged_by_the_re_registration",
+      "decoder_layer": "pre_registration_artifact",
+      "final_logits": "unchanged_by_the_re_registration",
+      "indexer_scores": "unchanged_by_the_re_registration",
+      "indexer_topk": "pre_registration_artifact",
+      "inverse_rope": "unchanged_by_the_re_registration",
+      "kv_latent_and_norm": "pre_registration_artifact",
+      "mhc": "pre_registration_artifact",
+      "moe_combined_output": "unchanged_by_the_re_registration",
+      "moe_expert_ids": "unchanged_by_the_re_registration",
+      "moe_expert_output": "pre_registration_artifact",
+      "moe_router_logits": "unchanged_by_the_re_registration",
+      "moe_routing_weights": "pre_registration_artifact",
+      "o_lora_output": "pre_registration_artifact",
+      "q_projection_and_norm": "pre_registration_artifact",
+      "rope": "pre_registration_artifact",
+      "sparse_attention_output": "pre_registration_artifact"
+    },
+    "modules_not_in_any_artifact": "The remaining entries were never exercised before the registration, so no artifact carries them. They are copied from the active manifest, which is sound precisely because the re-registration did not touch them; test_no_other_module_limit_moved_in_the_re_registration pins that independently, limit for limit.",
+    "not_the_original_bytes": "The superseded file itself was overwritten in place at registration time and was not retained, so this file does not hash to original_file_sha256 and must not be presented as those bytes. Its module limits are recovered from evidence written BEFORE the registration rather than re-authored: every artifact below records, per judged module, the exact tolerance entry that was applied to it. 13 of the entries -- including both re-registered ones -- are recovered that way, and every artifact agrees on all of them.",
+    "why_this_file_exists": "Stage 2 re-registered two BF16 output entries. Keeping the limits it replaced next to the active manifest turns 'no other limit moved' into a one-command diff instead of a claim."
+  },
+  "schema_version": 1,
+  "status": "superseded",
+  "superseded_by_sha256": "45c160d8d92ba6a621fb846d0e4897d2271041adfb87622a3c5805b70ec9c6e2"
+}

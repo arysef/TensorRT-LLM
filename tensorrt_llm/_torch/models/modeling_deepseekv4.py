@@ -31,7 +31,8 @@
 import copy
 import math
 import os
-from typing import TYPE_CHECKING, Dict, List, Literal, Optional
+import re
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Tuple
 
 if TYPE_CHECKING:
     from tensorrt_llm.llmapi.llm_args import TorchLlmArgs
@@ -230,18 +231,102 @@ _SHARED_EXPERT_RENAME = {
 }
 
 
-def _get_deepseek_v4_routed_moe_scale_name(weights: Dict, key_prefix: str) -> str:
-    """Return the model scale suffix for routed-expert checkpoint tensors."""
+#: ``safetensors`` dtype strings for the packed-MXFP4 byte container.
+_PACKED_MXFP4_CONTAINER_DTYPES = ("I8", "U8")
+
+
+def _checkpoint_tensor_meta(value: Any) -> Tuple[int, Any]:
+    """``(rank, dtype)`` of a checkpoint value, materialized or not.
+
+    A 149 GB checkpoint is opened as lazy ``safetensors`` slices (see
+    ``HfWeightLoader._streams_rank_local_weights``), and a slice answers
+    ``get_shape()``/``get_dtype()`` rather than ``.ndim``/``.dtype``. Reading
+    the shape must not be what materializes the tensor, so both spellings are
+    handled here instead of forcing ``value[:]`` at every probe site.
+    """
+    if hasattr(value, "get_dtype"):
+        return len(value.get_shape()), value.get_dtype()
+    return getattr(value, "ndim", 0), getattr(value, "dtype", None)
+
+
+def _deepseek_v4_routed_moe_is_packed(weights: Dict, key_prefix: str) -> bool:
+    """True when routed-expert weights arrive as the packed MXFP4 byte container.
+
+    Two FP4 nibbles per byte in an ``I8``/``U8`` 2-D tensor. The alternative is
+    FP8 block-scale routed experts, which are stored at full width.
+    """
     for key, value in weights.items():
-        if (
-            key.startswith(key_prefix)
-            and ".ffn.experts." in key
-            and key.endswith(".weight")
-            and getattr(value, "ndim", 0) == 2
-            and getattr(value, "dtype", None) in (torch.int8, torch.uint8)
+        if not (key.startswith(key_prefix) and ".ffn.experts." in key and key.endswith(".weight")):
+            continue
+        ndim, dtype = _checkpoint_tensor_meta(value)
+        if ndim == 2 and dtype in (
+            torch.int8,
+            torch.uint8,
+            *_PACKED_MXFP4_CONTAINER_DTYPES,
         ):
-            return "weight_scale"
-    return "weight_scale_inv"
+            return True
+    return False
+
+
+def _deepseek_v4_routed_moe_scale_name(packed: bool, routed_quant_config: Any = None) -> str:
+    """The scale-key suffix the *selected* routed-expert weight method reads.
+
+    The checkpoint stores one raw ``.scale`` per routed projection. Which model
+    key that has to become is decided by the weight method the routed-expert
+    quant mode resolves to, not by the container the bytes arrive in --- the two
+    disagree exactly on Hopper:
+
+    * ``W4A16_MXFP4`` is the only packed-MXFP4 mode SM90 supports, and
+      ``CutlassFusedMoE`` resolves it to :class:`WFP4A16FusedMoEMethod`, whose
+      ``load_quant_scales`` reads ``<expert>.<proj>.weight_scale_inv``;
+    * the ``W4A8_MXFP4_*`` modes SM100/103 resolve to are served by
+      ``MXFP4WeightFusedMoEMethod``, whose ``load_all_mxfp4_weight_scales``
+      reads ``<expert>.<proj>.weight_scale``;
+    * unpacked (FP8 block-scale) routed experts keep ``weight_scale_inv``.
+
+    ``routed_quant_config=None`` means the caller does not know the resolved
+    mode --- the DSpark draft remap, and the focused remap tests. Those keep the
+    historical container-derived answer, which is the SM100 spelling.
+    """
+    if not packed:
+        return "weight_scale_inv"
+    if routed_quant_config is not None and routed_quant_config.layer_quant_mode.has_w4a16_mxfp4():
+        return "weight_scale_inv"
+    return "weight_scale"
+
+
+def _get_deepseek_v4_routed_moe_scale_name(
+    weights: Dict, key_prefix: str, routed_quant_config: Any = None
+) -> str:
+    """Return the model scale suffix for routed-expert checkpoint tensors."""
+    return _deepseek_v4_routed_moe_scale_name(
+        _deepseek_v4_routed_moe_is_packed(weights, key_prefix), routed_quant_config
+    )
+
+
+def _deepseek_v4_routed_quant_config(model_config: ModelConfig[PretrainedConfig]) -> Any:
+    """The routed-expert quant config the decoder layers actually resolve.
+
+    ``DeepseekV4MoE._get_experts_quant_config`` reads one entry per layer. The
+    loader emits a single scale spelling for the whole shard, so the layers have
+    to agree; if a future checkpoint mixes modes this raises instead of picking
+    one silently.
+    """
+    per_layer = getattr(model_config, "quant_config_dict", None)
+    if not per_layer:
+        return model_config.quant_config
+    routed = {
+        name: config for name, config in per_layer.items() if name.endswith(".mlp.experts")
+    }
+    if not routed:
+        return model_config.quant_config
+    algos = {config.quant_algo for config in routed.values()}
+    if len(algos) > 1:
+        raise ValueError(
+            f"routed experts resolve to more than one quant algo {sorted(map(str, algos))}; "
+            "the checkpoint scale suffix would be ambiguous"
+        )
+    return next(iter(routed.values()))
 
 
 def _rename_deepseek_v4_attn_subkey(rest: str) -> str:
@@ -276,18 +361,71 @@ def _rename_deepseek_v4_ffn_subkey(rest: str, routed_moe_scale_name: str) -> str
     return rest
 
 
+def _materialize_checkpoint_tensor(value: Any) -> torch.Tensor:
+    """Read a checkpoint value, whether it is a tensor or a lazy slice."""
+    return value if isinstance(value, torch.Tensor) else value[:]
+
+
 def _maybe_view_deepseek_v4_routed_moe_tensor(
-    model_key: str, tensor: torch.Tensor, routed_moe_scale_name: str
+    model_key: str, tensor: Any, packed: bool
 ) -> torch.Tensor:
-    """Expose packed MXFP4 routed-expert tensors through their uint8 view."""
-    if (
-        routed_moe_scale_name == "weight_scale"
+    """Expose packed MXFP4 routed-expert tensors through their uint8 view.
+
+    The reinterpretation is only ever a *container* change: the checkpoint
+    stores two FP4 nibbles per byte in an ``I8`` container and the fused-MoE
+    weight methods address the same bytes as ``U8``. Nibble order, group-of-32
+    UE8M0 scales and byte order are untouched.
+
+    Gated on ``packed``, not on the scale spelling: on SM90 a packed checkpoint
+    is remapped to ``weight_scale_inv``, and keying the view off the suffix
+    would hand the fused-MoE method signed ``int8`` there.
+    """
+    if not (
+        packed
         and ".mlp.experts." in model_key
-        and (model_key.endswith(".weight") or model_key.endswith(".weight_scale"))
-        and tensor.dtype != torch.uint8
+        and (
+            model_key.endswith(".weight")
+            or model_key.endswith(".weight_scale")
+            or model_key.endswith(".weight_scale_inv")
+        )
     ):
-        return tensor.view(torch.uint8)
-    return tensor
+        # Left as-is, and deliberately not read: on a streamed checkpoint the
+        # value is still an unmaterialized slice here, and every consumer of a
+        # non-expert key indexes it (``weights[k][:]``) at the point it needs
+        # the bytes.
+        return tensor
+    _, dtype = _checkpoint_tensor_meta(tensor)
+    if dtype in (torch.uint8, "U8"):
+        return tensor
+    return _materialize_checkpoint_tensor(tensor).view(torch.uint8)
+
+
+def _deepseek_v4_local_expert_ids(model_config: ModelConfig[PretrainedConfig]) -> Optional[set]:
+    """The routed experts this rank owns, or ``None`` when it owns all of them.
+
+    Every rank sees every expert tensor in the checkpoint, but under EP it only
+    loads its own slice. On this checkpoint the routed experts are 149 GB of the
+    weights, so materializing all of them on all eight ranks would need ~1.2 TB
+    of host memory to load ~17 GB per rank. Returning the local set lets the
+    remap drop the other seven eighths while they are still unread slices.
+
+    ``None`` is returned whenever the assignment is not the plain contiguous
+    EP split -- no expert parallelism, or a load balancer that reassigns slots
+    -- because then this function does not know which experts the rank will ask
+    for, and dropping the wrong ones would turn into a missing-key failure.
+    """
+    mapping = model_config.mapping
+    ep_size = mapping.moe_ep_size
+    if ep_size is None or ep_size <= 1:
+        return None
+    if getattr(model_config, "moe_load_balancer", None) is not None:
+        return None
+    num_experts = getattr(model_config.pretrained_config, "n_routed_experts", None)
+    if not num_experts or num_experts % ep_size:
+        return None
+    per_rank = num_experts // ep_size
+    start = mapping.moe_ep_rank * per_rank
+    return set(range(start, start + per_rank))
 
 
 def _resolve_enable_fused_hc(config: PretrainedConfig) -> bool:
@@ -386,7 +524,11 @@ def _copy_deepseek_v4_fused_a_weight_scale(
 
 
 def _remap_deepseek_v4_checkpoint_keys(
-    weights: Dict, num_hidden_layers: int, kv_lora_rank: int = 448
+    weights: Dict,
+    num_hidden_layers: int,
+    kv_lora_rank: int = 448,
+    local_expert_ids: Optional[set] = None,
+    routed_quant_config: Any = None,
 ) -> Dict:
     """Convert DeepSeek-V4 checkpoint keys to model named-parameter keys.
 
@@ -405,16 +547,33 @@ def _remap_deepseek_v4_checkpoint_keys(
         are zero-filled — V4 indexer's k path is served by the compressor, so
         the base ``Indexer.wk`` / ``k_norm`` are unused at forward time.
       * Routed experts can use either FP8 block scales or the packed MXFP4
-        layout. The first routed expert weight determines the scale suffix used
-        for all routed expert tensors in the shard.
+        layout. The first routed expert weight decides which container is in
+        play for the whole shard; ``routed_quant_config`` then decides which
+        scale spelling the selected weight method reads (see
+        :func:`_deepseek_v4_routed_moe_scale_name`).
       * ``self_attn.o_a_proj`` is loaded by the DeepSeek-V4 loader because it
         is a direct MLA parameter, not a child Linear module.
       * ``mtp.0.head.weight`` is dropped — DeepSeekV4MTP reuses the main
         ``lm_head`` via ``shared_head``. Flash omits this key entirely; Flash-Base
         carries it but matches the main head, so we let the main head win.
+
+    ``local_expert_ids`` restricts routed-expert tensors to the ones this EP
+    rank will load. Values arrive as lazy ``safetensors`` slices on a streamed
+    checkpoint, so a dropped expert is never read off disk at all; see
+    :func:`_deepseek_v4_local_expert_ids` for when it is safe to pass.
     """
     mtp_layer_prefix = f"model.layers.{num_hidden_layers}"
-    routed_moe_scale_name = _get_deepseek_v4_routed_moe_scale_name(weights, "layers.")
+    routed_moe_packed = _deepseek_v4_routed_moe_is_packed(weights, "layers.")
+    routed_moe_scale_name = _deepseek_v4_routed_moe_scale_name(
+        routed_moe_packed, routed_quant_config
+    )
+    routed_expert_key = re.compile(r"\.ffn\.experts\.(\d+)\.")
+
+    def _is_foreign_expert(key: str) -> bool:
+        if local_expert_ids is None:
+            return False
+        match = routed_expert_key.search(key)
+        return match is not None and int(match.group(1)) not in local_expert_ids
 
     def _rename_layer_subkey(rest: str) -> Optional[str]:
         # rest examples: "attn_norm.weight", "ffn_norm.weight",
@@ -447,7 +606,8 @@ def _remap_deepseek_v4_checkpoint_keys(
         # is wgate or wkv; we want a stable "fusion bucket" key that ends at
         # the parent compressor.
         bucket = model_key.rsplit(f".{part}.", 1)[0]
-        compressor_split.setdefault(bucket, {})[part] = tensor
+        # The two halves are concatenated below, which needs real tensors.
+        compressor_split.setdefault(bucket, {})[part] = _materialize_checkpoint_tensor(tensor)
 
     def _emit_or_collect(model_key: str, tensor: torch.Tensor):
         """Route a (model_key, tensor) pair and collect compressor fusions."""
@@ -457,10 +617,13 @@ def _remap_deepseek_v4_checkpoint_keys(
             part = "wkv" if model_key.endswith(".wkv.weight") else "wgate"
             _record_compressor_part(model_key, part, tensor)
             return
-        tensor = _maybe_view_deepseek_v4_routed_moe_tensor(model_key, tensor, routed_moe_scale_name)
+        tensor = _maybe_view_deepseek_v4_routed_moe_tensor(model_key, tensor, routed_moe_packed)
         out[model_key] = tensor
 
     for k, v in weights.items():
+        # Another EP rank's expert: skipped before the value is ever read.
+        if _is_foreign_expert(k):
+            continue
         # Top-level keys that don't go through the layer/mtp branches.
         if k == "embed.weight":
             out["model.embed_tokens.weight"] = v
@@ -548,7 +711,11 @@ def _remap_deepseek_v4_checkpoint_keys(
             continue
         out[f"{bucket}.wkv_gate.weight"] = torch.cat([parts["wkv"], parts["wgate"]], dim=0)
 
-    return out
+    # Everything that survives is read here, once, and handed on as a real
+    # tensor: the shared `Linear`/`FusedMoE` loaders take tensors, not slices.
+    # The saving is not in deferring these reads, it is in never issuing the
+    # ones for another rank's experts -- seven eighths of a 149 GB checkpoint.
+    return {key: _materialize_checkpoint_tensor(value) for key, value in out.items()}
 
 
 class DeepseekV4WeightLoader:
@@ -578,6 +745,8 @@ class DeepseekV4WeightLoader:
                 weights,
                 num_hidden_layers=self.config.num_hidden_layers,
                 kv_lora_rank=self.config.kv_lora_rank,
+                local_expert_ids=_deepseek_v4_local_expert_ids(self.model_config),
+                routed_quant_config=_deepseek_v4_routed_quant_config(self.model_config),
             )
             # Synthesize defaults (with correct shape pulled from the model)
             # for parameters the model has but the V4 checkpoint omits. We do
@@ -1460,6 +1629,54 @@ class DeepseekV4Gate(nn.Module):
         return self.routing_method.top_k
 
 
+def _replicate_shared_expert() -> bool:
+    """Whether to keep the reference's replicated shared-expert topology.
+
+    The reference's shared expert is an unsharded dense `Expert`. TensorRT-LLM
+    shards it across the parallel group, which is a correct optimization but
+    replaces one BF16 rounding of a full-width FP32 sum with one rounding per
+    rank; the reference's own kernel misses the source parity limit by that
+    same margin when it is split the same way.
+
+    Restricted to pre-Blackwell because this bring-up's parity evidence is
+    measured there. Blackwell keeps the sharded layout it already ships --- its
+    memory footprint and its numerics stay exactly as they are, unmeasured by
+    this work and unchanged by it.
+    """
+    return get_sm_version() < 100
+
+
+def _shared_expert_parity_gemm(shared_experts: GatedMLP) -> None:
+    """Run the shared expert's two GEMMs through the reference's own structure.
+
+    The shared expert is the one dense FP8 block-scale path whose output is
+    compared element-wise against the checkpoint's own kernel, and the
+    comparison is carried out on BF16 tensors: one storage step at a large
+    element is several percent of the tensor's RMS, so "within a step
+    everywhere" --- which is where the shipped SM90 kernel sits --- is not
+    close enough. ``FP8BlockScalesParityLinearMethod`` keeps the weights, the
+    scales and the loader exactly as they are and swaps only the GEMM for one
+    that walks K in the reference's 128-wide blocks and rescales each block
+    before accumulating it. Measured on this checkpoint's shapes, that takes
+    the two kernels from disagreeing on ~6.6% of elements to ~1e-5 of them.
+
+    Same restriction as :func:`_replicate_shared_expert`, and for the same
+    reason: Blackwell's dense path is not measured by this work, so it keeps
+    the kernel it ships. The method itself also declines any checkpoint that
+    does not declare ``scale_fmt="ue8m0"``.
+    """
+    if not _replicate_shared_expert():
+        return
+    for projection in (shared_experts.gate_up_proj, shared_experts.down_proj):
+        projection.use_blockwise_parity_gemm = True
+        if getattr(projection, "quant_method", None) is not None:
+            # Weights were created inside `Linear.__init__`, so the method is
+            # already resolved; re-resolve it rather than let the opt-in land
+            # one construction too late. Both methods create and load the same
+            # parameters, so an already-created weight stays valid.
+            projection.quant_method = projection.get_quant_method(projection.quant_config)
+
+
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -1598,6 +1815,14 @@ class DeepseekV4MoE(nn.Module):
             reduce_output=False,
             swiglu_limit=swiglu_limit,
         )
+        _shared_expert_parity_gemm(self.shared_experts)
+
+        # A replicated shared expert is the only topology in which the
+        # reference's collective order --- reduce the routed accumulator, then
+        # add one whole shared output --- can be reproduced; a sharded one has
+        # no whole shared output to add. `shared_output_scale` is set exactly
+        # in that branch of `_compute_shared_expert_tp_size`.
+        self.shared_expert_is_replicated = shared_tp_size == 1 and self.shared_output_scale is not None
 
         self.allreduce = None
         if not self.use_dp and self.mapping.tp_size > 1:
@@ -1610,6 +1835,28 @@ class DeepseekV4MoE(nn.Module):
         # Store config values for perfect routing.
         self.model_config = model_config
         self.dtype = dtype
+
+    @property
+    def routed_accumulator_dtype(self) -> torch.dtype:
+        """The dtype the routed experts should hand their accumulator back in.
+
+        The reference `MoE.forward` keeps `y` in FP32 across every local expert
+        and across the expert-parallel reduction, adds the shared expert to it,
+        and casts once at the very end. A MoE backend normally returns the
+        model's activation dtype, which rounds that accumulator one step
+        earlier and then rounds again per rank inside the reduction. Backends
+        that can return it unrounded say so; the ones that cannot -- including
+        every Blackwell path -- keep the dtype they always returned.
+
+        Resolved on each read rather than cached in ``__init__`` because
+        ``ConfigurableMoE`` only binds ``.backend`` in ``create_weights``, which
+        the loader calls after construction: asking too early would silently
+        answer for the wrapper instead of the implementation.
+        """
+        backend = getattr(self.experts, "backend", self.experts)
+        if getattr(backend, "returns_fp32_accumulator", False):
+            return torch.float32
+        return self.dtype
 
     def _compute_shared_expert_tp_size(
         self, intermediate_size: int, block_size: int
@@ -1639,6 +1886,18 @@ class DeepseekV4MoE(nn.Module):
         if self.use_dp:
             # If using attention DP, the shared experts also use DP instead of TP.
             shared_tp_size = 1
+        elif _replicate_shared_expert():
+            # The reference builds the shared expert as a plain replicated
+            # `Expert`: one FP32 accumulation across the whole intermediate
+            # width, rounded to BF16 once. Splitting it rounds every rank's
+            # partial before they are added, and the reference's *own* kernel
+            # lands the same distance from its unsharded result when it is
+            # split the same way (see the shared-expert TP diagnosis in the
+            # MoE replay evidence). Replicating costs tp_size copies of one
+            # dense expert -- under a gigabyte at this checkpoint's width --
+            # and buys back that rounding.
+            shared_tp_size = 1
+            shared_output_scale = 1.0 / self.mapping.tp_size
         else:
             # Due to the restriction of block scale size (i.e., 128), the supported
             # TP sizes only include 1, 2, 4, 8, and 16. The math.gcd operation ensures that
@@ -1693,12 +1952,58 @@ class DeepseekV4MoE(nn.Module):
             router_logits,
             input_ids=input_ids,
             do_finalize=do_finalize,
-            output_dtype=hidden_states.dtype,
+            output_dtype=self.routed_accumulator_dtype,
             all_rank_num_tokens=all_rank_num_tokens,
             use_dp_padding=use_dp_padding,
         )
 
         return routed_output
+
+    def compute_shared_output(self, hidden_states, hidden_states_fp4=None, apply_output_scale=True):
+        """The shared expert's contribution, scaled for the reduction it joins.
+
+        Factored out of ``forward`` so that anything replaying this layer runs
+        the expression production runs --- including the ``shared_output_scale``
+        that compensates a shared expert narrower than the parallel group ---
+        instead of a copy of it that can drift.
+
+        ``apply_output_scale=False`` asks for the shared expert's own output,
+        for the caller that adds it *after* the reduction rather than through
+        it. See :meth:`adds_shared_after_the_reduction`.
+        """
+        shared_output = self.shared_experts(
+            hidden_states_fp4 if hidden_states_fp4 is not None else hidden_states
+        )
+        if apply_output_scale and self.shared_output_scale is not None:
+            shared_output *= self.shared_output_scale
+        return shared_output
+
+    def adds_shared_after_the_reduction(
+        self, final_all_reduce_params: Optional[AllReduceParams]
+    ) -> bool:
+        """Whether this call can use the reference's own collective order.
+
+        ``MoE.forward`` in the reference all-reduces the routed accumulator
+        first and only then adds its replicated shared expert::
+
+            dist.all_reduce(y)
+            y += self.shared_experts(x)
+
+        TensorRT-LLM's default is the algebraically equal but
+        floating-point-different order: scale the shared expert by
+        ``1/tp_size``, add it to the routed output, and reduce the sum. Summing
+        ``tp_size`` copies of ``S/tp_size`` is not exact --- a ring reduction
+        forms ``3S/8`` on the way, which rounds --- so the two orders disagree
+        by a rounding the parity gate can see.
+
+        Reproducing the reference's order needs both a whole shared output on
+        every rank and this call to own the reduction. When the reduction is
+        deferred to a fused epilogue downstream, the shared expert has to travel
+        through it and therefore keeps its ``1/tp_size`` share.
+        """
+        if not self.shared_expert_is_replicated or self.allreduce is None:
+            return False
+        return final_all_reduce_params is None or final_all_reduce_params.enable_allreduce
 
     def forward(
         self,
@@ -1712,13 +2017,14 @@ class DeepseekV4MoE(nn.Module):
         if not do_finalize:
             assert not self.use_dp
 
+        add_shared_after_reduce = self.adds_shared_after_the_reduction(final_all_reduce_params)
+
         def _compute_shared_output():
-            shared_output = self.shared_experts(
-                hidden_states_fp4 if hidden_states_fp4 is not None else hidden_states
+            return self.compute_shared_output(
+                hidden_states,
+                hidden_states_fp4,
+                apply_output_scale=not add_shared_after_reduce,
             )
-            if self.shared_output_scale is not None:
-                shared_output *= self.shared_output_scale
-            return shared_output
 
         def _compute_routed_output():
             routed_output = self.compute_routed_output(
@@ -1743,15 +2049,37 @@ class DeepseekV4MoE(nn.Module):
                 assert shared_output.numel() * self.top_k == routed_output.numel(), (
                     "unmatched tensor shape"
                 )
+                if add_shared_after_reduce:
+                    # This shape is combined by a kernel that hands its result
+                    # to the reduction below, so the shared expert travels
+                    # through the reduction after all and owes it its share.
+                    shared_output = shared_output * self.shared_output_scale
+                    add_shared_after_reduce = False
                 final_hidden_states = moe_reduce_add_shared_output(routed_output, shared_output)
+            elif add_shared_after_reduce:
+                # The reference's order: reduce the routed accumulator, then
+                # add one whole replicated shared expert to the result.
+                assert shared_output.size() == routed_output.size(), "unmatched tensor shape"
+                routed_output = self.allreduce(
+                    routed_output, all_reduce_params=final_all_reduce_params
+                )
+                final_hidden_states = shared_output + routed_output
             else:
                 assert shared_output.size() == routed_output.size(), "unmatched tensor shape"
+                # Promotes to the routed accumulator's dtype when that is wider,
+                # which is the reference's `y += self.shared_experts(x)`.
                 final_hidden_states = shared_output + routed_output
 
-            if not self.use_dp and self.mapping.tp_size > 1:
+            if not add_shared_after_reduce and not self.use_dp and self.mapping.tp_size > 1:
                 final_hidden_states = self.allreduce(
                     final_hidden_states, all_reduce_params=final_all_reduce_params
                 )
+
+            # The reference's single `y.type_as(x)`, after the reduction rather
+            # than before it. A no-op whenever the accumulator is already the
+            # model dtype, which is every path that did not opt in above.
+            if final_hidden_states.dtype is not self.dtype:
+                final_hidden_states = final_hidden_states.to(self.dtype)
 
             return final_hidden_states
 

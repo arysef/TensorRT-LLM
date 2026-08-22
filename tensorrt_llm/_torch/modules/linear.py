@@ -1149,6 +1149,18 @@ class FP8BlockScalesLinearMethod(UnquantizedLinearMethod):
         else:
             module.register_parameter("bias", None)
 
+    @staticmethod
+    def _use_ue8m0_activation_scales(module: Linear) -> bool:
+        """Whether this checkpoint's declared block-scale format is UE8M0.
+
+        Read from the module's own ``quant_config`` rather than from a global,
+        so a mixed-precision model that carries per-layer quant configs cannot
+        end up quantizing one layer's activations against another layer's
+        declared recipe.
+        """
+        quant_config = getattr(module, "quant_config", None)
+        return getattr(quant_config, "scale_fmt", None) == "ue8m0"
+
     def apply(self, module: Linear, input: torch.Tensor,
               bias: Optional[torch.Tensor]):
         # fp8_block_scaling_gemm does not support writing into an NCCL window
@@ -1182,8 +1194,14 @@ class FP8BlockScalesLinearMethod(UnquantizedLinearMethod):
             output = torch.ops.trtllm.fp8_block_scaling_gemm(
                 act_input_fp8, module.weight, act_input_sf, module.weight_scale)
         else:
+            # Honour the scale format the checkpoint declares. A producer that
+            # wrote "ue8m0" quantized activations against power-of-two scales,
+            # and its reference implementation still does; quantizing with an
+            # FP32 scale here is a different quantization of the same tensor,
+            # not a more accurate one, and the two disagree by roughly the FP8
+            # step. Checkpoints that declare nothing keep the FP32 default.
             act_input_fp8, act_input_sf = torch.ops.trtllm.fp8_quantize_1x128(
-                input)
+                input, self._use_ue8m0_activation_scales(module))
             output = torch.ops.trtllm.fp8_block_scaling_gemm(
                 act_input_fp8, module.weight, act_input_sf, module.weight_scale)
 
@@ -3517,6 +3535,16 @@ class Linear(nn.Module):
                     and is_nvfp4_marlin_supported_sm()
                     and MarlinNVFP4LinearMethod.is_supported(self)):
                 return MarlinNVFP4LinearMethod()
+        elif method_type is FP8BlockScalesLinearMethod:
+            # Same weights, same scales, a GEMM written to reproduce the
+            # producer's own kernel element for element. Opt-in only: it is
+            # slower than the shipped kernel and exists for modules whose
+            # numerical parity with that producer is being measured.
+            # Imported here because the module defining it imports this one.
+            from .fp8_blockwise_parity_gemm import FP8BlockScalesParityLinearMethod
+
+            if FP8BlockScalesParityLinearMethod.is_enabled(self):
+                return FP8BlockScalesParityLinearMethod()
         return quant_method
 
     @staticmethod

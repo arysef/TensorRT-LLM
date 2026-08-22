@@ -65,7 +65,8 @@ from .dspark.heads import DSparkConfidenceHead, build_markov_head
 from .modeling_deepseekv4 import (
     DeepseekV4DecoderLayer,
     DeepseekV4WeightLoader,
-    _get_deepseek_v4_routed_moe_scale_name,
+    _deepseek_v4_routed_moe_is_packed,
+    _deepseek_v4_routed_moe_scale_name,
     _maybe_view_deepseek_v4_routed_moe_tensor,
     _normalize_deepseek_v4_nvfp4_mixed_precision_config,
     _rename_deepseek_v4_attn_subkey,
@@ -220,7 +221,10 @@ def remap_dspark_draft_keys(weights: Dict, num_stages: int) -> Dict:
     model and are skipped here. The routed-expert scale suffix mirrors the V4
     loader: ``weight_scale`` for the packed MXFP4 layout, else ``weight_scale_inv``.
     """
-    routed_scale = _get_deepseek_v4_routed_moe_scale_name(weights, "mtp.")
+    # The draft namespace carries no per-layer routed quant config of its own,
+    # so the container decides both questions here, exactly as before.
+    routed_packed = _deepseek_v4_routed_moe_is_packed(weights, "mtp.")
+    routed_scale = _deepseek_v4_routed_moe_scale_name(routed_packed)
     out: Dict[str, torch.Tensor] = {}
     for k, v in weights.items():
         m = _DSPARK_MTP_RE.match(k)
@@ -231,7 +235,7 @@ def remap_dspark_draft_keys(weights: Dict, num_stages: int) -> Dict:
             continue
         sub = _rename_dspark_stage_subkey(m.group(2), routed_scale)
         model_key = f"mtp_layers.{stage}.{sub}"
-        v = _maybe_view_deepseek_v4_routed_moe_tensor(model_key, v, routed_scale)
+        v = _maybe_view_deepseek_v4_routed_moe_tensor(model_key, v, routed_packed)
         out[model_key] = v
     return out
 

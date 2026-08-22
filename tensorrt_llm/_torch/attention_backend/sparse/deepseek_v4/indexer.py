@@ -11,14 +11,16 @@ import torch
 from tensorrt_llm._torch.attention_backend.interface import MLAParams, PositionalEmbeddingParams
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm._torch.modules.multi_stream_utils import do_multi_stream
-from tensorrt_llm._torch.modules.rotary_embedding import RotaryEmbedding
-from tensorrt_llm._utils import is_sm_100f
+from tensorrt_llm._utils import get_sm_version, is_sm_100f
 from tensorrt_llm.models.modeling_utils import QuantConfig
 from tensorrt_llm.quantization.utils import fp8_utils
 
 from ..dsa.indexer import HAS_FAST_HADAMARD, Indexer, rotate_activation
+from . import sm90_quant
 from .compressor import Compressor, KVCacheDtype, resolve_kv_cache_dtype
 from .params import DeepSeekV4Params
+from .rope import deepseek_v4_rotary_embedding
+from .sm90_quant import hadamard_rotate
 
 if TYPE_CHECKING:
     from ..dsa.metadata import DSAtrtllmAttentionMetadata
@@ -62,7 +64,7 @@ class DeepseekV4Indexer(Indexer):
             skip_create_weights_in_init=skip_create_weights_in_init,
             use_custom_cublas_mm=True,
         )
-        self.rotary_emb = RotaryEmbedding(
+        self.rotary_emb = deepseek_v4_rotary_embedding(
             pos_embd_params.rope,
             head_dim=self.rope_dim,
             is_neox=False,
@@ -82,6 +84,13 @@ class DeepseekV4Indexer(Indexer):
         self.indexer_k_dtype = sparse_params.indexer_k_dtype
         compressor_preset = "mxfp4" if self.indexer_k_dtype == "fp4" else "fp8_blockwise"
         self.indexer_cache_dtype = resolve_kv_cache_dtype(compressor_preset)
+        # The fused compressor postprocess carries its own Hadamard butterfly
+        # and needs no extension, so SM90 keeps the source's rotation on K even
+        # when `fast-hadamard-transform` is missing and pairs it with a Torch
+        # rotation on Q below. Rotating only one side would be worse than
+        # rotating neither.
+        sm90 = get_sm_version() < 100
+        self.rotate_q_in_torch = sm90 and not HAS_FAST_HADAMARD
         self.compressor = Compressor(
             indexer_mla_params,
             layer_idx,
@@ -92,11 +101,35 @@ class DeepseekV4Indexer(Indexer):
             dtype=dtype,
             kv_cache_dtype=compressor_preset,
             is_indexer=True,
-            rotate_activation=HAS_FAST_HADAMARD,
+            rotate_activation=HAS_FAST_HADAMARD or sm90,
+            simulate_source_act_quant=sm90,
         )
         self.indexer_start_event = torch.cuda.Event()
         self.weights_proj_event = torch.cuda.Event()
         self.k_cache_update_event = torch.cuda.Event()
+
+        # Q's FP4 simulation is the other half of the compressor's; keeping one
+        # side and not the other would score FP4 keys against FP8 queries.
+        self.simulate_source_q_fp4 = (
+            self.compressor.simulate_source_act_quant
+            and self.indexer_cache_dtype == KVCacheDtype.FP8_BLOCKWISE
+        )
+        assert not self.simulate_source_q_fp4 or self.scale_fmt == "ue8m0", (
+            "the SM90 indexer relies on power-of-two FP8 scales to carry the E2M1 "
+            f"levels losslessly, but scale_fmt is {self.scale_fmt!r}"
+        )
+        # The score reduction is the third half of the same contract: the
+        # source keeps `index_score` in BF16 (bf16 einsum, bf16 per-head weight
+        # multiply, bf16 head sum) while every DeepGEMM MQA-logits kernel
+        # reduces in FP32. That is finer but different, and top-k is discrete,
+        # so SM90 runs the reduction itself. Both halves are enabled together:
+        # simulating FP4 inputs and then reducing them at the wrong width would
+        # trade one selection error for another.
+        self.source_faithful_scores = self.simulate_source_q_fp4
+        assert not (self.source_faithful_scores and self.use_cute_dsl_paged_mqa_logits), (
+            "the CuTe DSL paged MQA-logits kernel bypasses _call_paged_mqa_logits, so the "
+            "SM90 source-faithful decode reduction would be silently skipped"
+        )
 
     def post_load_weights(self):
         # V4 does not use the V3 fused fp32 wk+weights_proj GEMM, and the
@@ -174,8 +207,24 @@ class DeepseekV4Indexer(Indexer):
         # because the kernel only cares about the concatenated row. K goes
         # through the same rotation in compressor_postprocess_scatter so
         # layouts match.
-        q = rotate_activation(q)
+        q = hadamard_rotate(q) if self.rotate_q_in_torch else rotate_activation(q)
         q = q.view(-1, self.head_dim)
+        if self.simulate_source_q_fp4:
+            # `Indexer.forward` in inference/model.py does
+            # `fp4_act_quant(q, fp4_block_size, True)` right here: the
+            # checkpoint is QAT'd for FP4 index scores, so the rounding is
+            # semantics. Note `inplace=True` --- the source quantizes and
+            # dequantizes, leaving Q in BF16 and never materialising a narrow
+            # container for it.
+            sm90_quant.fp4_quant_dequant_(q)
+        if self.source_faithful_scores:
+            # So the source-faithful score kernels take that BF16 tensor as it
+            # stands. Quantizing it to FP8 here would round-trip losslessly
+            # (a power-of-two scale carries E2M1 exactly) but the scale would
+            # then have to be threaded through the decode plumbing, which
+            # only carries a q scale on the FP4 path. There is nothing to
+            # carry: the values are already the ones the source scores.
+            return q.view(-1, self.n_heads, self.head_dim), None
         if self.indexer_cache_dtype == KVCacheDtype.MXFP4_BLOCKWISE:
             nope_dim = self.head_dim - self.rope_dim
             q_nope, q_pe = q.split([nope_dim, self.rope_dim], dim=-1)
@@ -200,9 +249,74 @@ class DeepseekV4Indexer(Indexer):
         # `weights.scalar_type() == kFloat`, so cast explicitly here. The FP8
         # branch gets upcast for free via the fp32 `q_scale` multiply in
         # `_weight_scale`, so no cast is needed there.
+        if self.source_faithful_scores:
+            # `weights = self.weights_proj(x) * (self.softmax_scale *
+            # self.n_heads ** -0.5)` in `Indexer.forward`, with `weights_proj`
+            # declared bf16, so the constant multiply rounds to bf16 too. No
+            # q scale is folded in: on this path Q is not quantized, and
+            # folding a scale here would move a rounding step across the ReLU.
+            return weights * self.weight_scale_factor
         if self.indexer_cache_dtype == KVCacheDtype.MXFP4_BLOCKWISE:
             return weights.float() * self.weight_scale_factor
         return self._weight_scale(weights, q_scale)
+
+    def _call_mqa_logits(
+        self,
+        q_fp8: torch.Tensor,
+        k_fp8: torch.Tensor,
+        k_scale: torch.Tensor,
+        weights: torch.Tensor,
+        cu_seqlen_ks: torch.Tensor,
+        cu_seqlen_ke: torch.Tensor,
+        q_scale: Optional[torch.Tensor],
+        clean_logits: bool = True,
+    ) -> torch.Tensor:
+        """Context-phase logits, with the source's BF16 reduction on SM90.
+
+        The chunking, query tiling, TP query split and top-k in
+        ``sparse_attn_indexer`` are unchanged; only the innermost score
+        computation moves off DeepGEMM's FP32 reduction.
+        """
+        if not self.source_faithful_scores:
+            return super()._call_mqa_logits(
+                q_fp8, k_fp8, k_scale, weights, cu_seqlen_ks, cu_seqlen_ke, q_scale, clean_logits
+            )
+        return sm90_quant.source_index_scores(
+            q_fp8, k_fp8, k_scale, weights, cu_seqlen_ks, cu_seqlen_ke
+        )
+
+    def _call_paged_mqa_logits(
+        self,
+        q_decode: torch.Tensor,
+        k_cache: torch.Tensor,
+        weights_decode: torch.Tensor,
+        context_lens: torch.Tensor,
+        block_table: torch.Tensor,
+        scheduler_metadata_buffer: torch.Tensor,
+        max_seq_len: int,
+        q_scale: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Decode-phase logits over the paged indexer K cache.
+
+        ``scheduler_metadata_buffer`` is DeepGEMM's work-partitioning plan and
+        has no meaning for the Triton kernel, which partitions by
+        ``(query row, slot tile)``; it is accepted so this stays a drop-in
+        override rather than a second call site in the caller.
+        """
+        if not self.source_faithful_scores:
+            return super()._call_paged_mqa_logits(
+                q_decode,
+                k_cache,
+                weights_decode,
+                context_lens,
+                block_table,
+                scheduler_metadata_buffer,
+                max_seq_len,
+                q_scale,
+            )
+        return sm90_quant.source_index_scores_paged(
+            q_decode, k_cache, weights_decode, context_lens, block_table, max_seq_len
+        )
 
     def _update_k_cache_if_needed(
         self,
