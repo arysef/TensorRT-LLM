@@ -1,0 +1,164 @@
+{
+  "environment_failure_signatures": [
+    {
+      "all_of": [
+        "pidfd_getfd",
+        "Operation not permitted",
+        "SYS_PTRACE"
+      ],
+      "explanation": "trtllm_dev.sh creates the dev container without CAP_SYS_PTRACE, so every test that starts an MPI pool dies inside mpi4py's pidfd_getfd. It is a property of the container and no DeepSeek-V4 change can cause or fix it from inside the repository.",
+      "id": "container_lacks_cap_sys_ptrace"
+    },
+    {
+      "all_of": [
+        "torch.OutOfMemoryError",
+        "CUDA out of memory"
+      ],
+      "explanation": "DEEPSEEK_V4_TINY_CONFIG is only tiny in depth: 7 layers of 256 unquantized BF16 routed experts at hidden 4096 / intermediate 2048 need more than the 79.18 GiB this H100 has, and the construction dies after allocating 75.34 GiB. The test's ModelConfig is built directly rather than through from_pretrained, so the checkpoint's quantization_config never applies and the experts stay BF16. iteration 31 pristine probe: the DeepSeek-V4 production diff was stashed, leaving the tree at fe4aebfe0f, and this test failed there with the same message; the working tree was then restored byte-identically (git diff sha256 e7b554b77ac53df24b6106b050637cd6877dada61124f0ba6879d57a9e66a5f5 before and after). Log: /cache/dsv4_flash_h100/iter31/pristine_two.log",
+      "id": "model_exceeds_this_nodes_80gb_hbm"
+    },
+    {
+      "all_of": [
+        "no MoE implementation can serve this layer",
+        "sm_unsupported"
+      ],
+      "explanation": "An NVFP4 MoE parametrisation with no SM90 backend: the resolver turns down TRTLLMGenFusedMoE and CutlassFusedMoE with sm_unsupported and the test carries no SM100 skip guard. Neither the resolver nor either backend is touched by this bring-up. iteration 31 pristine probe: the DeepSeek-V4 production diff was stashed, leaving the tree at fe4aebfe0f, and this test failed there with the same message; the working tree was then restored byte-identically (git diff sha256 e7b554b77ac53df24b6106b050637cd6877dada61124f0ba6879d57a9e66a5f5 before and after). Log: /cache/dsv4_flash_h100/iter31/pristine_two.log",
+      "id": "nvfp4_moe_has_no_sm90_implementation"
+    }
+  ],
+  "expected_environment_failures": [
+    "tests/unittest/_torch/modeling/test_modeling_deepseekv4.py::test_deepseek_v4_sanity",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_ONE_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e60_k4_h2048_i1408-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=FP8_BLOCK_SCALES-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.bfloat16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=FP8-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A16_MXFP4-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W4A8_AWQ-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=DeepSeekV3]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_configurable_moe_multi_gpu[parallel=DEP-comm=NVLINK_TWO_SIDED-e8_k1_h512_i512-seq=8-dtype=torch.float16-backend=CUTLASS-quant=W8A16-routing=Renormalize]",
+    "tests/unittest/_torch/modules/moe/test_moe_module.py::test_trtllm_gen_fp32_routing_bias[dtype0-NVFP4-MiniMaxM3MoeRoutingMethod-moe_model_config1]"
+  ],
+  "expected_skip_signatures": [
+    {
+      "all_of": [
+        "not supported in pre-Blackwell architecture"
+      ],
+      "explanation": "the reason string is emitted by `skip_pre_blackwell` in tests/unittest/utils/util.py, an unmodified upstream shared helper that skips when getSMVersion() < 100. These tests declare themselves Blackwell-only; running them on SM90 is impossible by the test's own construction, not by anything this bring-up did.",
+      "id": "upstream_blackwell_only_guard"
+    },
+    {
+      "all_of": [
+        "fast_hadamard_transform not installed"
+      ],
+      "explanation": "tests/unittest/_torch/attention/sparse/deepseek_v4/test_compressor_kernel.py:2078 skips its `rotate` variants when the optional fast_hadamard_transform package is missing. Both the guard and the file are unmodified by this bring-up and the package is absent from the dev container image. This is real coverage this node does not have, recorded rather than claimed: the Compressor rotate path is exercised instead by the registered SM90 tests in test_deepseek_v4_hopper.py and by source_activation_replay.",
+      "id": "optional_fast_hadamard_transform_absent"
+    }
+  ],
+  "protected_blackwell_controls": [
+    "_torch.attention.sparse.deepseek_v4.test_deepseek_v4_hopper::test_sm90_indexer_fp4_kernels_are_blackwell_only_and_the_config_falls_back",
+    "_torch.attention.sparse.deepseek_v4.test_deepseek_v4_sm90_runtime::test_sm100_still_selects_the_native_branch_and_sm90_does_not",
+    "_torch.modeling.test_modeling_deepseekv4::test_blackwell_mxfp4_routed_experts_keep_weight_scale[w4a8_fp8-eager_int8]",
+    "_torch.modeling.test_modeling_deepseekv4::test_blackwell_mxfp4_routed_experts_keep_weight_scale[w4a8_fp8-lazy_I8]",
+    "_torch.modeling.test_modeling_deepseekv4::test_blackwell_mxfp4_routed_experts_keep_weight_scale[w4a8_mxfp8-eager_int8]",
+    "_torch.modeling.test_modeling_deepseekv4::test_blackwell_mxfp4_routed_experts_keep_weight_scale[w4a8_mxfp8-lazy_I8]",
+    "_torch.modeling.test_modeling_deepseekv4::test_deepseek_v4_model_config_defaults_to_fp8_before_blackwell",
+    "_torch.modeling.test_modeling_deepseekv4::test_deepseek_v4_moe_auto_backend_on_blackwell",
+    "_torch.modules.test_mhc::test_mhc_dsv4_sm100_pre_mapping_still_offers_the_tf32_deepgemm_tactics"
+  ],
+  "protected_blackwell_controls_provenance": "The protected SM100/Blackwell dispatch tests inside the registered files, as the focused required-H100 pass spells them. Registered at iteration 32 from the iteration-31 artifact's discovered set and hashed into MANIFEST.sha256 BEFORE the iteration-32 measurement they gate, so the inventory could not be trimmed to fit a run. Every entry must be present and passed in the focused pass; missing, skipped or failed each fails the report. Counting discovered tests instead would call an empty selection clean.",
+  "registered_at": "2026-08-22T16:30:00Z",
+  "registered_command": "/home/ubuntu/dsv4-flash-h100-agent/trtllm_dev.sh pytest -q tests/unittest/_torch/modeling/test_modeling_deepseekv4.py tests/unittest/_torch/attention/sparse/deepseek_v4 tests/unittest/_torch/attention/sparse/dsa tests/unittest/_torch/modules/test_mhc.py tests/unittest/_torch/modules/moe/test_moe_backend.py tests/unittest/_torch/modules/moe/test_moe_module.py tests/unittest/llmapi/test_deepseek_v4_tokenizer.py",
+  "required_h100_command": "/home/ubuntu/dsv4-flash-h100-agent/trtllm_dev.sh pytest -q tests/unittest/_torch/modeling/test_modeling_deepseekv4.py tests/unittest/_torch/attention/sparse/deepseek_v4 tests/unittest/_torch/attention/sparse/dsa tests/unittest/_torch/modules/test_mhc.py tests/unittest/_torch/modules/moe/test_moe_backend.py tests/unittest/_torch/modules/moe/test_moe_module.py tests/unittest/llmapi/test_deepseek_v4_tokenizer.py -k 'deepseek_v4 or deepseekv4 or dsv4 or sm90 or hopper' --junitxml=<report.xml>",
+  "required_h100_rule": {
+    "blackwell_any_of": [
+      "sm100",
+      "sm103",
+      "blackwell"
+    ],
+    "excluded_with_evidence": [
+      {
+        "evidence": "iteration 31 pristine probe: the DeepSeek-V4 production diff was stashed, leaving the tree at fe4aebfe0f, and this test failed there with the same message; the working tree was then restored byte-identically (git diff sha256 e7b554b77ac53df24b6106b050637cd6877dada61124f0ba6879d57a9e66a5f5 before and after). Log: /cache/dsv4_flash_h100/iter31/pristine_two.log",
+        "node_id": "tests/unittest/_torch/modeling/test_modeling_deepseekv4.py::test_deepseek_v4_sanity",
+        "reason": "cannot run on an 80 GiB H100 at all: it constructs 7 layers of 256 unquantized BF16 routed experts and OOMs after 75.34 GiB"
+      },
+      {
+        "evidence": "iteration 31 pristine probe: the DeepSeek-V4 production diff was stashed, leaving the tree at fe4aebfe0f, and this test failed there with the same message; the working tree was then restored byte-identically (git diff sha256 e7b554b77ac53df24b6106b050637cd6877dada61124f0ba6879d57a9e66a5f5 before and after). Log: /cache/dsv4_flash_h100/iter31/pristine_two.log",
+        "node_id": "_torch.modeling.test_modeling_deepseekv4::test_deepseek_v4_sanity",
+        "reason": "the same test, as the focused JUnit pass spells its id"
+      }
+    ],
+    "node_id_any_of": [
+      "deepseek_v4",
+      "deepseekv4",
+      "dsv4",
+      "sm90",
+      "hopper"
+    ]
+  },
+  "schema_version": 3,
+  "what_gates": "environment_failure_signatures gates: a failure counts as expected only when its own recorded traceback carries every clause of a signature. expected_environment_failures does not gate; it is the set observed when this baseline was registered, kept so a later run can report new and resolved failures. A node id in that list whose failure stops matching a signature is reported genuine and fails the report, and a failure that matches a signature but is absent from the list is reported as new. The list can therefore only narrow what counts as expected, never widen it. protected_blackwell_controls gates too: each registered control must appear in the focused pass and pass, so a deleted, skipped or failed Blackwell dispatch control cannot be absorbed by an empty count."
+}

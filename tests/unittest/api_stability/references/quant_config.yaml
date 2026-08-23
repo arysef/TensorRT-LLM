@@ -31,6 +31,9 @@ methods:
       quant_algo:
         annotation: Optional[tensorrt_llm.quantization.mode.QuantAlgo]
         default: null
+      scale_fmt:
+        annotation: Optional[Literal["ue8m0"]]
+        default: null
       smoothquant_val:
         annotation: float
         default: 0.5

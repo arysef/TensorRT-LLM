@@ -11,9 +11,10 @@ import torch.nn.functional as F
 from tensorrt_llm._torch.attention_backend.interface import MLAParams, PositionalEmbeddingParams
 from tensorrt_llm._torch.modules.linear import Linear
 from tensorrt_llm._torch.modules.rms_norm import RMSNorm
-from tensorrt_llm._torch.modules.rotary_embedding import RotaryEmbedding
 
+from . import sm90_quant
 from .params import DeepseekV4AttentionType
+from .rope import deepseek_v4_rotary_embedding
 
 if TYPE_CHECKING:
     from .metadata import DeepseekV4TrtllmAttentionMetadata
@@ -74,6 +75,9 @@ class Compressor(nn.Module):
         dtype: Data type for computation
         kv_cache_dtype: Cache preset string or KVCacheDtype.
         rotate_activation: Whether to apply Hadamard transform in postprocessing (False to skip)
+        simulate_source_act_quant: Reproduce the DeepSeek-V4 checkpoint's own
+            FP32 gate/KV projection and its post-pool activation quantisation
+            simulation. Only the DeepSeek-V4 SM90 path asks for this.
     """
 
     def __init__(
@@ -88,6 +92,7 @@ class Compressor(nn.Module):
         kv_cache_dtype: Union[str, KVCacheDtype] = KVCacheDtype.NONE,
         is_indexer: bool = False,
         rotate_activation: bool = False,
+        simulate_source_act_quant: bool = False,
     ):
         super().__init__()
         # Dimensions
@@ -118,7 +123,7 @@ class Compressor(nn.Module):
             use_custom_cublas_mm=True,
         )
         self.norm = RMSNorm(hidden_size=self.head_dim, eps=norm_eps, dtype=dtype)
-        self.rotary_emb = RotaryEmbedding(
+        self.rotary_emb = deepseek_v4_rotary_embedding(
             pos_embd_params.rope,
             head_dim=self.rope_head_dim,
             is_neox=pos_embd_params.is_neox,
@@ -126,6 +131,65 @@ class Compressor(nn.Module):
 
         # Learnable absolute positional encoding for compression
         self.ape = nn.Parameter(torch.empty(compress_ratio, self.state_dim, dtype=torch.float32))
+
+        # DeepSeek-V4's own `Compressor.forward` ends with an activation
+        # quantize/dequantize round trip -- blockwise-64 FP8 stored as BF16 for
+        # the main compressor, E2M1 for the indexer's -- and projects in FP32.
+        # The fused native postprocess models neither, and its E2M1 packing is
+        # `__CUDA_ARCH__ >= 1000` only (`packE2M1x2` returns 0 below it), so
+        # SM90 supplies both in Triton. Off by default: this is checkpoint
+        # semantics, requested by the DeepSeek-V4 call sites that know they are
+        # serving that checkpoint, not a property of every Compressor.
+        self.simulate_source_act_quant = simulate_source_act_quant
+
+    def _source_postprocess(
+        self, kv_comp: torch.Tensor, position_ids: torch.Tensor
+    ) -> torch.Tensor:
+        """RMSNorm -> RoPE -> Hadamard, rounding to the input dtype at each step.
+
+        `compressor_postprocess_scatter` runs this whole chain in FP32 and
+        rounds once, at the store. The source rounds three times ---
+        ``kv = self.norm(kv.to(dtype))``, then an in-place
+        ``apply_rotary_emb`` on that BF16 tensor, then ``rotate_activation``,
+        which asserts BF16 --- and the difference is not academic: the
+        indexer's next step is an E2M1 quantiser whose levels are 25-50% apart,
+        so a ~4e-3 BF16 discrepancy pushes roughly half a percent of values one
+        level away from the source, which is enough to break exact top-k at
+        the checkpoint's 512 width. Measured on a 2304-token prefill: 377 of
+        73728 values differed, and 152 of 253 deciding query rows selected a
+        different slot set.
+
+        Measured on the real checkpoint, the main compressor is not exempt
+        either: its blockwise-64 FP8 levels are ~6% apart, and layer 3's cached
+        rows scored rel_max_abs 3.707e-02 against the source through the fused
+        kernel and are *bit-exact* through this chain. Both compressors use it
+        on SM90; SM100/103 keeps the fused path in both cases.
+
+        The norm is `sm90_quant.source_rms_norm`, not `self.norm`: TensorRT-LLM's
+        RMSNorm rounds the normalised value to BF16 before multiplying by a BF16
+        weight, while the checkpoint multiplies in FP32 and rounds once. Using
+        `self.norm` here scored 7.4e-02 on the same rows -- worse than the fused
+        kernel it was meant to replace.
+        """
+        kv = sm90_quant.source_rms_norm(kv_comp, self.norm.weight, self.norm.variance_epsilon)
+        num_tokens = kv.shape[0]
+        # Padded rows carry whatever the metadata buffer last held; they are
+        # never scattered, but the RoPE table lookup still has to stay in
+        # range. Clamped out of place: `position_ids` is a metadata buffer the
+        # rest of the forward also reads.
+        table = self.rotary_emb.rotary_cos_sin
+        positions = position_ids.clamp(0, table.shape[0] - 1)
+        torch.ops.trtllm.mla_rope_inplace(
+            kv.view(num_tokens, 1, self.head_dim),
+            positions,
+            table,
+            1,
+            self.nope_head_dim,
+            self.rope_head_dim,
+            False,
+            self.rotary_emb.is_neox,
+        )
+        return sm90_quant.hadamard_rotate(kv) if self.rotate_activation else kv
 
     def forward(
         self,
@@ -192,7 +256,41 @@ class Compressor(nn.Module):
         # Project input to KV and score in the checkpoint dtype. The compressor
         # kernels accept bf16 or fp32 kv_score and convert values to fp32
         # internally for state updates and online-softmax accumulation.
-        kv_score = F.linear(x.to(self.wkv_gate.weight.dtype), self.wkv_gate.weight)
+        if self.simulate_source_act_quant:
+            # `Compressor.forward` in inference/model.py upcasts before this
+            # projection --- "# compression need fp32", with wkv/wgate declared
+            # as FP32 Linears over BF16 checkpoint weights. A BF16 GEMM here
+            # leaves a ~2e-2 relative gap that the compressor's own FP8
+            # quantisation then amplifies to a whole FP8 step on any element
+            # sitting near a decision boundary. The kernels already accept an
+            # FP32 kv_score (KV_SCORE_ELEM_BYTES=4 is instantiated) and
+            # accumulate in FP32 either way, so this only widens the input.
+            #
+            # Issued as the source's *two* projections rather than this
+            # module's fused one, and that is not cosmetic: the source runs
+            # `self.wkv(x)` and `self.wgate(x)` as separate [state_dim, dim]
+            # GEMMs, and asking cuBLAS for one [2 * state_dim, dim] GEMM
+            # instead changes the accumulation it picks. Measured on the real
+            # checkpoint at layer 40, ratio 4, 257-token prefill: the fused
+            # GEMM moves 17 of 32768 pooled values by one BF16 ULP, and the
+            # blockwise-64 FP8 quantiser two steps later turns two of them
+            # into a whole FP8 level -- rel_max_abs 5.198e-02 against the
+            # registered 0.03. Driving the *same* TensorRT-LLM reduction from
+            # the split projection is bit-exact against the source at every
+            # layer measured (2, 20, 40, 41, 42); driving it from the fused
+            # projection is not. Shallow layers happened to pass only because
+            # none of their perturbed values sat on a quantiser boundary.
+            xf = x.float()
+            weight = self.wkv_gate.weight.float()
+            kv_score = torch.cat(
+                [
+                    F.linear(xf, weight[: self.state_dim]),
+                    F.linear(xf, weight[self.state_dim :]),
+                ],
+                dim=-1,
+            )
+        else:
+            kv_score = F.linear(x.to(self.wkv_gate.weight.dtype), self.wkv_gate.weight)
 
         # Allocate output buffer
         kv_comp = torch.empty(total_num_comp_tokens, self.head_dim, device=x.device, dtype=x.dtype)
@@ -249,7 +347,14 @@ class Compressor(nn.Module):
         kv_out = None
         quant_output = None
         scale_output = None
-        if self.is_indexer:
+        # On SM90 the indexer runs the source's postprocess chain itself rather
+        # than the fused kernel's; see `_source_postprocess` for why.
+        sm90_indexer_fp4 = (
+            self.is_indexer
+            and self.simulate_source_act_quant
+            and self.kv_cache_dtype == KVCacheDtype.FP8_BLOCKWISE
+        )
+        if self.is_indexer and not sm90_indexer_fp4:
             if self.kv_cache_dtype == KVCacheDtype.NONE:
                 kv_out = torch.empty_like(kv_comp)
             elif self.kv_cache_dtype == KVCacheDtype.FP8_BLOCKWISE:
@@ -271,6 +376,45 @@ class Compressor(nn.Module):
 
         position_ids = metadata.compressed_position_ids_cuda[self.compress_ratio][:total_tokens]
         compressed_mask = metadata.compressed_mask_cuda[self.compress_ratio][:total_tokens]
+
+        if sm90_indexer_fp4:
+            return sm90_quant.quantize_indexer_rows_to_fp8_cache(
+                self._source_postprocess(kv_comp, position_ids),
+                kv_cache,
+                compressed_mask,
+                cu_new_comp_kv,
+                num_comp_tokens,
+                start_pos,
+                block_table,
+                tokens_per_block=compress_tokens_per_block,
+            )
+
+        if self.simulate_source_act_quant and not self.is_indexer:
+            # SM90 main compressor: the checkpoint's own postprocess chain.
+            # `compressor_postprocess_scatter` runs norm and RoPE in FP32 and
+            # rounds once at the store; the source rounds after the norm and
+            # again after the RoPE, and the blockwise-64 FP8 step that follows
+            # turns that difference into a whole FP8 level on any value near a
+            # decision boundary. Measured against the real checkpoint's cached
+            # rows: fused 1.835e-02 (ratio 4) and 3.707e-02 (ratio 128, over the
+            # registered 0.03), this chain bit-exact on both.
+            assert self.kv_cache_dtype == KVCacheDtype.NONE, (
+                "the SM90 compressor source chain assumes the BF16 cache preset; "
+                f"got {self.kv_cache_dtype.name}, which already quantizes the row"
+            )
+            sm90_quant.write_source_compressed_rows(
+                self._source_postprocess(kv_comp, position_ids),
+                kv_cache,
+                compressed_mask,
+                cu_new_comp_kv,
+                num_comp_tokens,
+                start_pos,
+                block_table,
+                total_tokens=total_tokens,
+                tokens_per_block=compress_tokens_per_block,
+                nope_dim=self.nope_head_dim,
+            )
+            return kv_comp, None
 
         # Fused postprocess + scatter: RMSNorm + RoPE + Hadamard + paged cache write
         torch.ops.trtllm.compressor_postprocess_scatter(

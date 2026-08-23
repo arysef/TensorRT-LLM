@@ -1859,9 +1859,26 @@ class Indexer(nn.Module):
                     .unsqueeze(0)
                     .expand(num_gen_tokens, -1)
                 )
-                row_indices = torch.arange(num_gen_tokens, device=q_decode.device) // next_n
                 next_n_offset = torch.arange(num_gen_tokens, device=q_decode.device) % next_n
-                index_end_pos = (context_lens[row_indices] - next_n + next_n_offset).unsqueeze(1)
+                # `context_lens` is the 2-D buffer the paged-MQA logits API
+                # requires: (batch, next_n) on the default path and (token, 1)
+                # on the expanded-MTP one. In both layouts the entry belonging
+                # to generated token `g` is flat index `g`, so flatten and take
+                # it. Indexing with the *batch* row instead --- as this line
+                # did --- yields (tokens, next_n) and then broadcasts against
+                # the (tokens, columns) position grid as a third dimension,
+                # which raises the moment next_n and the column count differ.
+                # The custom-kernel branch above never saw it because it reads
+                # the 1-D `kv_lens_cuda_runtime` slice rather than this buffer.
+                assert next_n == 1 or self.compress_ratio == 1, (
+                    "the eager decode top-k derives its window in token units "
+                    f"(- next_n + offset) from a context length already divided by "
+                    f"compress_ratio={self.compress_ratio}; that only coincides at "
+                    f"next_n=1, and this call has next_n={next_n}"
+                )
+                index_end_pos = (
+                    context_lens.reshape(-1)[:num_gen_tokens] - next_n + next_n_offset
+                ).unsqueeze(1)
                 # index_end_pos: [B * N, 1]
                 mask = positions <= index_end_pos
                 # mask: [B * N, L]

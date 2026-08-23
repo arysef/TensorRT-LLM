@@ -22,7 +22,8 @@ import os
 import re
 from enum import IntFlag, auto
 from functools import cached_property
-from typing import TYPE_CHECKING, Dict, Generator, List, Optional, Union
+from typing import (TYPE_CHECKING, Dict, Generator, List, Literal, Optional,
+                    Union)
 
 from pydantic import Field, PrivateAttr
 
@@ -123,6 +124,13 @@ class SpeculativeDecodingMode(IntFlag):
             assert False, "Unknown speculative_decoding_mode " + args.speculative_decoding_mode
 
 
+#: Block-scale storage formats a checkpoint may declare. Mirrors the closed
+#: ``Literal[None, "ue8m0"]`` contract the DeepSeek reference implementation
+#: uses for the same setting, so an unrecognised spelling is a configuration
+#: error rather than a silent fall back to the default quantizer.
+ScaleFmt = Literal["ue8m0"]
+
+
 class QuantConfig(StrictBaseModel):
     """Serializable quantization configuration class, part of the PretrainedConfig."""
 
@@ -134,6 +142,15 @@ class QuantConfig(StrictBaseModel):
         default=None, description="KV cache quantization algorithm.")
     group_size: Optional[int] = Field(
         default=128, description="Group size for group-wise quantization.")
+    scale_fmt: Optional[ScaleFmt] = Field(
+        default=None,
+        description="Storage format the checkpoint declares for its block "
+        "scales: 'ue8m0' for power-of-two scales, None for each kernel's "
+        "default. The activation quantizer must round its scales the same way "
+        "the checkpoint's own reference implementation does, otherwise the two "
+        "quantize the same activation differently. The set is closed on "
+        "purpose: an unknown or mis-cased value must be rejected here rather "
+        "than silently selecting the default quantizer.")
     smoothquant_val: float = Field(
         default=0.5,
         description="Smoothing parameter alpha used in smooth quant.")

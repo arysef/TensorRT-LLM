@@ -96,6 +96,13 @@ class MoEProblem:
     activation: str = "Swiglu"
     #: ``RoutingMethodType`` member name; None means the call site did not say.
     routing: Optional[str] = None
+    #: ``QuantConfig.scale_fmt``: the block-scale format the checkpoint
+    #: declares, or None when it declares nothing. Present because one
+    #: ``quant`` value can cover two activation quantizers that produce
+    #: different codes for the same tensor --- ``W4A8_MXFP4_FP8`` is served
+    #: both per tensor and per 128 K values with power-of-two scales --- and
+    #: an impl that implements one of them cannot state its gate without it.
+    act_scale_fmt: Optional[str] = None
 
     @property
     def routing_method_type(self) -> Optional["RoutingMethodType"]:
@@ -368,6 +375,7 @@ class MoEResolutionReport:
                 "bias": self.problem.bias,
                 "activation": self.problem.activation,
                 "routing": self.problem.routing,
+                "act_scale_fmt": self.problem.act_scale_fmt,
             },
             "deployment": {
                 "ep_size": self.deployment.ep_size,

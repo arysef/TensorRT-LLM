@@ -51,6 +51,28 @@ def _fused_hc_mma_supported() -> bool:
         return False
 
 
+@lru_cache(maxsize=1)
+def _pre_mapping_tf32_allowed() -> bool:
+    """Whether the TF32 DeepGEMM pre_mapping tactics may be offered to the tuner.
+
+    ``dg_splitk`` / ``dg_nosplit`` run the mix GEMM through
+    ``tf32_hc_prenorm_gemm``: 10 mantissa bits, against the FP32 FMA path's 23.
+    The reference upcasts on purpose --- ``hc_pre`` computes its mixes on
+    ``x.flatten(2).float()`` --- and the extra bits survive all the way to the
+    layer input, because Sinkhorn's sigmoids turn a mix error into a residual
+    weight error directly.
+
+    Measured on DeepSeek-V4-Flash layer 2, 257 real tokens, against the
+    checkpoint's own ``hc_pre`` evaluated in FP32: every ``fma`` tactic scored
+    ``rel_max_abs`` 1.07e-02 on ``layer_input`` and every ``dg_*`` tactic scored
+    1.71e-01, i.e. 16x worse and past the module's registered 3e-02 tolerance.
+    So on SM90 the tuner is only offered the FMA ladder --- it selects on
+    latency and would otherwise be free to trade that accuracy away. SM100 and
+    later keep both, where the fused TF32 path is the shipped default.
+    """
+    return get_sm_version() >= 100
+
+
 _DG_NUM_SPLITS = 16
 
 
@@ -315,7 +337,7 @@ class MhcPreMappingRunner(TunableRunner):
             for bs in _BIGFUSE_BLOCK_SIZE_OPTIONS:
                 tactics.append(("fma", 8, 2, bs))
 
-        if _get_dg_fn() is not None:
+        if _get_dg_fn() is not None and _pre_mapping_tf32_allowed():
             for bs in _BIGFUSE_BLOCK_SIZE_OPTIONS:
                 tactics.append(("dg_splitk", 0, 0, bs))
                 tactics.append(("dg_nosplit", 0, 0, bs))

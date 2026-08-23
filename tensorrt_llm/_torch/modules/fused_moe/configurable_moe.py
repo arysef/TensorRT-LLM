@@ -638,7 +638,15 @@ class ConfigurableMoE(MoE):
 
         if isinstance(x, Fp4QuantizedTensor):
             assert output_dtype is not None
-        else:
+        elif output_dtype is None or not getattr(
+            getattr(self, "backend", None), "returns_fp32_accumulator", False
+        ):
+            # Historically this line overwrote the caller's ``output_dtype``
+            # unconditionally, so a backend able to hand back an accumulator
+            # wider than its input could never be asked for one. Only backends
+            # that advertise the ability are exempted, which keeps every
+            # existing call site -- including the ones that already pass an
+            # output dtype -- on exactly the behaviour they have today.
             output_dtype = x.dtype
 
         # DWDP: wait for prefetch to complete and swap backend weight param.data

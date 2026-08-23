@@ -1,5 +1,6 @@
 import math
 import pickle  # nosec B403
+import socket
 from abc import ABC, abstractmethod
 from enum import IntEnum
 from functools import lru_cache, wraps
@@ -842,18 +843,33 @@ class TorchDist(Distributed):
                 )
                 self.local_comm = pg
 
+    @staticmethod
+    def _node_identity() -> Tuple[Any, int]:
+        """``(node key, local GPU index)`` for this rank.
+
+        When Ray is driving it owns both facts: it placed the actor on a node
+        and assigned it a GPU. Outside Ray -- a plain ``torchrun`` job, which is
+        the other way to reach this non-MPI communicator -- the same two facts
+        come from the host and the CUDA context. Both values are only used to
+        group ranks by node when building the intra-node process group, so any
+        key that is stable and unique per node serves.
+        """
+        try:
+            ray_running = ray.is_initialized()
+        except RuntimeError:
+            # `executor.ray.stub` raises from __getattr__ when Ray is absent.
+            ray_running = False
+        if ray_running:
+            gpu_index = [int(id) for id in ray.get_gpu_ids()]
+            assert len(gpu_index) == 1
+            return ray.util.get_node_ip_address(), gpu_index[0]
+        return socket.gethostname(), torch.cuda.current_device()
+
     def _get_cluster_info(self):
         if self.cluster_info is not None:
             return self.cluster_info
 
-        if ray.is_initialized():
-            node_ip = ray.util.get_node_ip_address()
-        else:
-            raise RuntimeError("Ray is not initialized")
-
-        gpu_index = [int(id) for id in ray.get_gpu_ids()]
-
-        assert len(gpu_index) == 1
+        node_ip, gpu_index = self._node_identity()
 
         # Gather node ip
         node_list = [None] * torch.distributed.get_world_size()
@@ -862,7 +878,7 @@ class TorchDist(Distributed):
 
         # Gather gpu index
         gpu_list = [None] * torch.distributed.get_world_size()
-        torch.distributed.all_gather_object(gpu_list, gpu_index[0])
+        torch.distributed.all_gather_object(gpu_list, gpu_index)
 
         # Gather rank
         rank_list = [None] * torch.distributed.get_world_size()

@@ -104,6 +104,20 @@ class FusedMoEQuantScalesW4A16MXFP4(NamedTuple):
     scale_2_interleaved: torch.Tensor
 
 
+class FusedMoEQuantScalesMXFP4BlockScale(NamedTuple):
+    """Raw group-32 UE8M0 weight exponents, in checkpoint layout.
+
+    Distinct from :class:`FusedMoEQuantScalesW4A16MXFP4`, which holds the same
+    exponents widened to BF16 and interleaved for the Cutlass W4A16 kernel.
+    The block-scale path reads the exponent bytes directly, so widening and
+    interleaving them here would only cost memory and lose the fact that they
+    are exponents.
+    """
+
+    fc31_weight_scale: torch.Tensor
+    fc2_weight_scale: torch.Tensor
+
+
 class FusedMoEQuantScalesW4A8MXFP4FP8(NamedTuple):
     fc31_weight_block_scale: torch.Tensor
     fc31_dequant_scale: torch.Tensor
@@ -2204,6 +2218,117 @@ class WFP4A16FusedMoEMethod(FusedMoEMethodBase):
             w2_s_shape[0], w2_s_shape[2] // module.interleave[1],
             w2_s_shape[1] * module.interleave[1])
         module.fc2_weight_scale.data.copy_(w2_scales_interleaved.contiguous())
+
+
+class MXFP4BlockScaleFusedMoEMethod(WFP4A16FusedMoEMethod):
+    """Packed MXFP4 experts consumed with block-scaled FP8 activations.
+
+    The bytes are the same ones :class:`WFP4A16FusedMoEMethod` loads --- two
+    E2M1 nibbles per byte along K, one UE8M0 exponent per 32 logical K values,
+    ``w3`` concatenated before ``w1`` --- so expert weight loading, sharding
+    and padding are inherited rather than restated. Only the scales differ:
+    the Cutlass W4A16 kernel wants them widened to BF16 and interleaved for
+    its dequantize-in-registers epilogue, while the Triton block-scale kernel
+    reads the exponent byte itself.
+
+    The scale key is ``weight_scale``, the spelling a packed-MXFP4 checkpoint
+    remaps to for every mode other than ``W4A16_MXFP4``; the exponents are
+    direct multipliers, not inverses, in both.
+    """
+
+    def create_weights(self, module: torch.nn.Module):
+        module.sm_version = get_sm_version()
+        weight_dtype = torch.uint8
+        w3_w1_weight_shape = (module.expert_size_per_partition,
+                              module.intermediate_size_per_partition * 2,
+                              module.hidden_size // 2)
+        w2_weight_shape = (module.expert_size_per_partition, module.hidden_size,
+                           module.intermediate_size_per_partition // 2)
+
+        assert module.hidden_size % self.group_size == 0, (
+            f"hidden_size {module.hidden_size} must be a multiple of the MXFP4 "
+            f"group {self.group_size}")
+        assert module.intermediate_size_per_partition % self.group_size == 0, (
+            f"intermediate_size_per_partition "
+            f"{module.intermediate_size_per_partition} must be a multiple of "
+            f"the MXFP4 group {self.group_size}")
+
+        # One UE8M0 exponent byte per group of 32 K values, kept in the same
+        # [expert, out, K/32] shape the checkpoint stores.
+        fc31_weight_scale = nn.Parameter(torch.empty(
+            module.expert_size_per_partition,
+            module.intermediate_size_per_partition * 2,
+            module.hidden_size // self.group_size,
+            dtype=torch.uint8),
+                                         requires_grad=False)
+        module.register_parameter("fc31_weight_scale", fc31_weight_scale)
+
+        fc2_weight_scale = nn.Parameter(torch.empty(
+            module.expert_size_per_partition,
+            module.hidden_size,
+            module.intermediate_size_per_partition // self.group_size,
+            dtype=torch.uint8),
+                                        requires_grad=False)
+        module.register_parameter("fc2_weight_scale", fc2_weight_scale)
+
+        FusedMoEMethodBase.create_weights(self, module, weight_dtype,
+                                          w3_w1_weight_shape, w2_weight_shape)
+
+        self._online_eplb_not_supported(module)
+
+        self.setup_quant_scales(module)
+
+    def setup_quant_scales(self, module: torch.nn.Module):
+        module.quant_scales = FusedMoEQuantScalesMXFP4BlockScale(
+            fc31_weight_scale=module.fc31_weight_scale,
+            fc2_weight_scale=module.fc2_weight_scale)
+
+    def load_quant_scales(self, module: torch.nn.Module, weights: Dict):
+        device = module.fc31_weight_scale.data.device
+
+        all_w3_scales = []
+        all_w1_scales = []
+        for expert_id in module.initial_local_expert_ids:
+            shards = []
+            for proj in ("w3", "w1"):
+                shard = load_weight_shard(weights[f"{expert_id}.{proj}.weight_scale"],
+                                          module.tp_size,
+                                          module.tp_rank,
+                                          TensorParallelMode.COLUMN,
+                                          device=device)
+                pad_inter = module.intermediate_size_per_partition - shard.shape[
+                    0]
+                pad_hidden = module.hidden_size // self.group_size - shard.shape[
+                    1]
+                shards.append(
+                    torch.nn.functional.pad(shard,
+                                            (0, pad_hidden, 0, pad_inter)))
+            all_w3_scales.append(shards[0])
+            all_w1_scales.append(shards[1])
+
+        # Same [w3; w1] order as the fused weight, so a scale row always
+        # belongs to the weight row with the same index.
+        w3_w1_scales = torch.cat(
+            [torch.stack(all_w3_scales),
+             torch.stack(all_w1_scales)], dim=-2)
+        module.fc31_weight_scale.data.copy_(
+            w3_w1_scales.view(torch.uint8).contiguous())
+
+        all_w2_scales = []
+        for expert_id in module.initial_local_expert_ids:
+            shard = load_weight_shard(weights[f"{expert_id}.w2.weight_scale"],
+                                      module.tp_size,
+                                      module.tp_rank,
+                                      TensorParallelMode.ROW,
+                                      device=device)
+            pad_hidden = module.hidden_size - shard.shape[0]
+            pad_inter = module.intermediate_size_per_partition // self.group_size - shard.shape[
+                1]
+            all_w2_scales.append(
+                torch.nn.functional.pad(shard, (0, pad_inter, 0, pad_hidden)))
+
+        module.fc2_weight_scale.data.copy_(
+            torch.stack(all_w2_scales).view(torch.uint8).contiguous())
 
 
 class NVFP4FusedMoEMethod(FusedMoEMethodBase):

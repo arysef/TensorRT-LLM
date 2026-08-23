@@ -17,12 +17,14 @@ from tensorrt_llm._torch.modules.multi_stream_utils import (
     maybe_execute_in_parallel,
 )
 from tensorrt_llm._torch.modules.rms_norm import RMSNorm
-from tensorrt_llm._torch.modules.rotary_embedding import RotaryEmbedding
 from tensorrt_llm._torch.utils import AuxStreamType
 from tensorrt_llm._utils import get_sm_version, is_sm_100f
 
 from ..hooks import MLASparseHooks, register_mla_sparse_hooks
 from ..params import SparseBackendForwardArgs
+from .rope import deepseek_v4_rotary_embedding
+from .sm90 import forward_sparse_attn_sm90
+from .sm90_quant import q_norm_source_dtype
 
 if TYPE_CHECKING:
     from tensorrt_llm._torch.distributed import AllReduceParams
@@ -113,7 +115,7 @@ def initialize_sparse_attn(self) -> None:
         assert self.indexer is not None
         self.indexer.aux_stream = self.indexer_aux_stream
 
-    self.inverse_rotary_emb = RotaryEmbedding(
+    self.inverse_rotary_emb = deepseek_v4_rotary_embedding(
         self.pos_embd_params.rope,
         head_dim=self.qk_rope_head_dim,
         is_neox=self.pos_embd_params.is_neox,
@@ -628,7 +630,23 @@ def forward_generation_sparse_attn(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Run the DeepSeek-V4 generation absorption path."""
     if get_sm_version() < 100:
-        raise RuntimeError("DeepSeek-V4 is not supported on pre-Blackwell GPUs")
+        # Hopper has no fused sparse-MLA op -- `AttentionOp::useSparseMLA()`
+        # needs `mUseTllmGen`, false on SM90 -- so the same three steps run
+        # explicitly against the same metadata, block tables and KV pools.
+        del compressed_kv, k_pe
+        assert not enable_dsv4_epilogue_fusion, (
+            "the DSv4 FMHA epilogue fusion is Blackwell-only and must not be selected on SM90"
+        )
+        assert output is not None
+        return forward_sparse_attn_sm90(
+            self,
+            q,
+            attn_metadata,
+            output,
+            latent_cache,
+            topk_indices,
+            AttentionInputType.generation_only,
+        )
     del compressed_kv, k_pe
     num_tokens = q.shape[0]
     q_pe = q.view(-1, self.num_heads_tp, self.qk_head_dim)[..., self.qk_nope_head_dim :]
@@ -796,7 +814,21 @@ def forward_context_sparse_attn(
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """Run the DeepSeek-V4 context absorption path."""
     if get_sm_version() < 100:
-        raise RuntimeError("DeepSeek-V4 is not supported on pre-Blackwell GPUs")
+        # See the matching branch in `forward_generation_sparse_attn`.
+        del compressed_kv, k_pe
+        assert not enable_dsv4_epilogue_fusion, (
+            "the DSv4 FMHA epilogue fusion is Blackwell-only and must not be selected on SM90"
+        )
+        assert output is not None
+        return forward_sparse_attn_sm90(
+            self,
+            q,
+            attn_metadata,
+            output,
+            latent_cache,
+            topk_indices,
+            AttentionInputType.context_only,
+        )
     del compressed_kv, k_pe
     num_tokens = q.shape[0]
     q_pe = q.view(-1, self.num_heads_tp, self.qk_head_dim)[..., self.qk_nope_head_dim :]
@@ -1028,6 +1060,17 @@ def forward_sparse_attn(
 
     def _q_b_layernorm(q: torch.Tensor) -> torch.Tensor:
         assert q.dim() == 2 and q.shape[1] == self.num_heads_tp * self.qk_head_dim
+        if get_sm_version() < 100:
+            # The native kernel evaluates the source's per-head RMS scaling in
+            # FP32 and rounds once; the source keeps every step in BF16, and
+            # the gap exceeds the registered q_projection_and_norm tolerance.
+            # SM100/103 keeps the native kernel.
+            return q_norm_source_dtype(
+                q,
+                self.num_heads_tp,
+                self.qk_head_dim,
+                float(self.q_b_layernorm.variance_epsilon),
+            )
         return torch.ops.trtllm.deepseek_v4_q_norm(
             q,
             self.num_heads_tp,

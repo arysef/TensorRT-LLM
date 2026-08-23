@@ -22,7 +22,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterator, List, Optional,
-                    TypeVar)
+                    TypeVar, get_args)
 
 import filelock
 import torch
@@ -42,7 +42,7 @@ from tensorrt_llm.llmapi.llm_args import (DeepSeekSparseAttentionConfig,
                                           MultimodalConfig)
 from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
-from tensorrt_llm.models.modeling_utils import QuantConfig
+from tensorrt_llm.models.modeling_utils import QuantConfig, ScaleFmt
 from tensorrt_llm.models.quant_config_utils import \
     update_quant_config_from_compressed_tensors
 from tensorrt_llm.quantization.mode import QuantAlgo
@@ -203,6 +203,25 @@ def hf_remote_code_lock(timeout: int = 10) -> Iterator[None]:
     else:
         _release_lock_ignoring_infra_errors(lock)
     yield
+
+
+def _validate_scale_fmt(declared: Optional[str]) -> Optional[str]:
+    """Check a checkpoint-declared block-scale format against the closed set.
+
+    ``QuantConfig.scale_fmt`` is a ``Literal`` so construction is checked, but
+    this loader assigns to the field, and pydantic does not validate
+    assignment. Unrecognised values must fail here: kept as data they would
+    still miss every ``== "ue8m0"`` comparison downstream, so the model would
+    quantize activations against a recipe its checkpoint never declared and
+    nothing would say so.
+    """
+    supported = get_args(ScaleFmt)
+    if declared is not None and declared not in supported:
+        raise ValueError(
+            f"quantization_config.scale_fmt={declared!r} is not a supported "
+            f"block-scale format; expected one of {supported} or no key at "
+            f"all. Values are case-sensitive.")
+    return declared
 
 
 @dataclass(kw_only=True)
@@ -645,6 +664,21 @@ class ModelConfig(Generic[TConfig]):
             assert tuple(block_size) == (
                 128, 128), "FP8_BLOCK_SCALES only supports block_size=(128,128)"
             quant_config.group_size = block_size[0]
+            # How the checkpoint stores its block scales. "ue8m0" means the
+            # producer rounded them to powers of two, and the model's own
+            # reference implementation quantizes activations the same way; a
+            # runtime that rounds differently quantizes the same activation to
+            # different FP8 codes. Carried as data here and honoured by the
+            # kernels that have the option, so a checkpoint that declares
+            # nothing keeps every existing default.
+            #
+            # Validated rather than assigned: pydantic does not check field
+            # assignment on this model, and an unrecognised spelling
+            # (``"UE8M0"``, a typo) would otherwise be stored intact and then
+            # quietly miss every ``== "ue8m0"`` branch, i.e. quantize against a
+            # recipe the checkpoint did not declare.
+            quant_config.scale_fmt = _validate_scale_fmt(
+                hf_quant_config.get("scale_fmt"))
 
             # Set default exclude_modules for FP8_BLOCK_SCALES
             # kv_b_proj must always be excluded: FP8 128x128 block boundaries
@@ -805,6 +839,22 @@ class ModelConfig(Generic[TConfig]):
             experts_quant_config.quant_algo = ModelConfig.get_mxfp4_quant_algo(
                 moe_backend)
             experts_quant_config.group_size = 32
+            # A packed-MXFP4 checkpoint that declares "ue8m0" was produced with
+            # W4A8 arithmetic: its reference implementation quantizes every
+            # routed-expert activation to FP8 with a power-of-two scale per
+            # token and per 128 K values before both GEMMs. Pre-Blackwell,
+            # `get_mxfp4_quant_algo` answers W4A16 because that is the only
+            # thing the Cutlass kernel could do -- leaving those activations in
+            # BF16, which is a different function of the same weights. Say what
+            # the checkpoint declares instead and let the resolver find an
+            # implementation for it; Blackwell keeps the algorithm it already
+            # resolves, so its dispatch is unchanged.
+            declared_scale_fmt = _validate_scale_fmt(
+                (getattr(pretrained_config, "quantization_config", None)
+                 or {}).get("scale_fmt"))
+            if declared_scale_fmt is not None and get_sm_version() < 100:
+                experts_quant_config.quant_algo = QuantAlgo.W4A8_MXFP4_FP8
+                experts_quant_config.scale_fmt = declared_scale_fmt
         else:
             experts_quant_config.quant_algo = QuantAlgo.NVFP4
             experts_quant_config.group_size = 16

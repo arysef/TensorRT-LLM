@@ -15,6 +15,7 @@ from .fused_moe_cutlass import CutlassFusedMoE
 from .fused_moe_deepgemm import DeepGemmFusedMoE
 from .fused_moe_densegemm import DenseGEMMFusedMoE
 from .fused_moe_marlin import MarlinFusedMoE
+from .fused_moe_mxfp4_blockscale import BlockScaleMXFP4FusedMoE
 from .fused_moe_triton import TritonFusedMoE
 from .fused_moe_trtllm_gen import TRTLLMGenFusedMoE
 from .fused_moe_vanilla import VanillaMoE
@@ -156,7 +157,8 @@ def create_moe_backend(
         # tensor limit is given (see the MegaMoE branch below).
         assert moe_cls in [
             CutlassFusedMoE, TRTLLMGenFusedMoE, DeepGemmFusedMoE,
-            MegaMoEDeepGemm, CuteDslFusedMoE, MegaMoECuteDsl
+            MegaMoEDeepGemm, CuteDslFusedMoE, MegaMoECuteDsl,
+            BlockScaleMXFP4FusedMoE
         ], f"swiglu_limit_scalar is not supported in {moe_cls.__name__}."
 
     if moe_cls == TRTLLMGenFusedMoE:
@@ -197,7 +199,7 @@ def create_moe_backend(
         raise ValueError(
             "TRTLLM-Gen backend-local activation options are only supported "
             f"by TRTLLMGenFusedMoE, got {moe_cls.__name__}")
-    elif moe_cls in (CutlassFusedMoE, MarlinFusedMoE):
+    elif moe_cls in (CutlassFusedMoE, MarlinFusedMoE, BlockScaleMXFP4FusedMoE):
         # CuteDslFusedMoE, DeepGemmFusedMoE, and CuteDslB12xFusedMoE
         # also subclass CutlassFusedMoE but have narrower constructors, so
         # they take their own branches below.
@@ -465,7 +467,8 @@ def create_moe(
 
     if moe_cls in (DeepGemmFusedMoE, TRTLLMGenFusedMoE, CuteDslFusedMoE,
                    CuteDslB12xFusedMoE, CutlassFusedMoE, DenseGEMMFusedMoE,
-                   MegaMoEDeepGemm, MegaMoECuteDsl, MarlinFusedMoE):
+                   MegaMoEDeepGemm, MegaMoECuteDsl, MarlinFusedMoE,
+                   BlockScaleMXFP4FusedMoE):
         return ConfigurableMoE(
             moe_cls=moe_cls,
             routing_method=routing_method,

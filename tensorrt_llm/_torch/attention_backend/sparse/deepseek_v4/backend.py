@@ -27,6 +27,7 @@ from tensorrt_llm._torch.attention_backend.interface import (
     merge_attention_forward_args,
 )
 from tensorrt_llm._torch.attention_backend.trtllm import TrtllmAttention
+from tensorrt_llm._utils import get_sm_version
 from tensorrt_llm.models.modeling_utils import QuantConfig
 
 from .cache_manager import get_token_bytes
@@ -35,6 +36,7 @@ from .indexer import DeepseekV4Indexer
 from .kernels import deepseek_v4_local_to_global_indices
 from .metadata import DeepseekV4TrtllmAttentionMetadata
 from .params import DeepseekV4AttentionType, DeepSeekV4Params
+from .rope import install_deepseek_v4_rope_table
 
 if TYPE_CHECKING:
     from tensorrt_llm.llmapi.llm_args import SparseAttentionConfig
@@ -93,6 +95,13 @@ class DeepseekV4TrtllmAttention(TrtllmAttention):
             **kwargs,
         )
 
+        # The checkpoint pins its own rotary table (see `rope.py`); the shared
+        # NumPy builder computes the same constant by a different recipe, and
+        # the last-place difference is observable in the attention output.
+        install_deepseek_v4_rope_table(
+            self, self.rope_params, interleave=True, inv_freq_attr="rotary_inv_freq"
+        )
+
         self.sparse_attention_config = sparse_attention_config
         self.compress_ratio = sparse_attention_config.compress_ratios[layer_idx]
 
@@ -125,6 +134,25 @@ class DeepseekV4TrtllmAttention(TrtllmAttention):
                 kv_cache_dtype=kv_cache_dtype,
                 dtype=dtype,
                 rotate_activation=False,
+                # The SM90 branch is the only consumer of these compressed rows
+                # and reads them straight out of the BF16 pool, so it needs the
+                # checkpoint's own post-pool FP8 simulation. SM100/103 keeps
+                # the fused native postprocess it already validates against.
+                simulate_source_act_quant=(get_sm_version() < 100 and kv_cache_dtype == "default"),
+            )
+
+    def _ensure_rope_table_size(self, required_max_positions: int) -> None:
+        """Regrow the rotary table without falling back to the shared recipe.
+
+        The base implementation rebuilds through ``create_rope_const_params``,
+        which would silently swap the checkpoint's table for the NumPy one the
+        first time a request needs more positions than the model was sized for.
+        """
+        if required_max_positions > self.rope_params.max_positions:
+            self.rope_params.max_positions = required_max_positions
+            self.rotary_inv_freq, self.rotary_cos_sin = self.rope_params.create_rope_const_params()
+            install_deepseek_v4_rope_table(
+                self, self.rope_params, interleave=True, inv_freq_attr="rotary_inv_freq"
             )
 
     def _prepare_sparse_forward_args(

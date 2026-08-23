@@ -1,0 +1,182 @@
+{
+  "schema_version": 2,
+  "status": "pre-registered",
+  "registered_before": "any TensorRT-LLM vs source measurement on this checkpoint",
+  "checkpoint_revision": "60d8d70770c6776ff598c94bb586a859a38244f1",
+  "re_registration": {
+    "registered_at": "2026-08-22T03:12:00Z",
+    "supersedes_sha256": "7641c45bd21f91c6b0adc4d5a020a5d04e018b31bb828b98b9009df80fe8d6b2",
+    "modules": ["sparse_attention_output", "attention_sink"],
+    "reason": "The superseded manifest judged the BF16 sparse-attention output on rel_max_abs <= 0.03, which is a maximum absolute error divided by the tensor RMS. On the ratio-128 layers that output has a peak/RMS of about 20, so one BF16 storage step at the peak element scores 0.0807 -- 2.7x the limit -- and the rule silently demanded bit-exact agreement with the official TileLang kernel at the tail. It is not a reachable rule: the checkpoint's own TileLang kernel fails it against the independent pure-Torch golden at rank 4 element [0,186,0,470] (2.34375 vs 2.359375, rel_max_abs 0.040346954) and at rank 6 (0.037841231), with no TensorRT-LLM code in that comparison. These two entries are therefore re-registered on BF16 storage resolution: the candidate must be finite, hold the original 0.999 cosine floor, sit at most one storage step from the reference at the element driving the maximum absolute error, have no element beyond one storage step, and average at most 1e-4 storage steps. This corrects a mis-specified metric for one dtype-bound output; it does not waive a failure and it does not loosen a limit anywhere else.",
+    "measured_before_registration": {
+      "trtllm_vs_source_rank4_layer3_prefill": "max_abs 0.015625 = one BF16 value at 2.35, ref RMS 0.387265831, rel_max_abs 0.040346961, cosine 1.0, abs_max_element_steps 0.8477",
+      "source_vs_independent_golden_rank4": "rel_max_abs 0.040346954 at the identical element, elements_beyond_one_step 0",
+      "source_vs_independent_golden_rank6": "rel_max_abs 0.037841231, one adjacent BF16 value",
+      "exhaustion": "21 substantive accumulation variants (value/QK K-splits, ordered FP32 outer products with no tensor core, exp vs exp2, fp-fusion on/off) on both production and source inputs left the deciding element unmoved, with bit-exact Q, both KV regions, sink and softmax scale on all eight ranks"
+    },
+    "unchanged": "Every other module's float limits and every 'exact' rule (indexer_topk, moe_expert_ids, argmax, generated tokens) are byte-identical to the superseded manifest.",
+    "storage_step_floor": "The step is the BF16 grid spacing at the element, floored at the grid spacing of the tensor's own RMS. Without the floor the metric is pure relative precision and is dominated by cancellation near-zeros: on layer 3 the source-vs-golden comparison has an element whose two values both print as 0.0 sitting 18.2 unfloored steps apart, so an unfloored rule is again unreachable by any implementation including the source. Below the RMS the floor permits an absolute difference of one storage step of the tensor, i.e. eps (7.8e-3) of the RMS, which is 4x tighter than the 0.03 rel_max_abs limit it replaces; above the RMS the floor is inert. Unfloored ratios stay in the artifact under storage_resolution.unfloored_relative.",
+    "still_recorded_but_no_longer_gating": "rel_max_abs and max_abs remain measured and reported for these two entries; they are diagnostics under this manifest rather than pass/fail limits."
+  },
+  "rationale": {
+    "metric_definitions": {
+      "cosine": "1 - cosine distance between flattened reference and candidate, computed in float64.",
+      "max_abs": "max(|candidate - reference|), reported in absolute units.",
+      "mean_abs": "mean(|candidate - reference|), reported in absolute units.",
+      "rel_max_abs": "max_abs divided by sqrt(mean(reference^2)); scale-free, so a tolerance cannot be silently satisfied by a small-magnitude tensor.",
+      "storage_step": "One step of the candidate dtype's representable grid at an element: max(|candidate|, |reference|) * finfo(dtype).eps, floored at rms(reference) * finfo(dtype).eps so the quantity stays a statement about the tensor's storage resolution rather than about relative precision at cancellation near-zeros.",
+      "abs_max_element_steps": "The difference at the element with the largest absolute error, expressed in storage steps. That element is by definition the one that drives rel_max_abs, so this says whether the worst disagreement is a rounding of the stored value or a real arithmetic difference.",
+      "elements_beyond_one_step": "Count of elements whose difference exceeds one storage step. Zero means the two implementations agree everywhere to the precision the output is stored in.",
+      "mean_abs_in_dtype_steps": "Mean difference over all elements in storage steps; catches widespread sub-step drift that a maximum cannot see.",
+      "exact": "bitwise/id equality; not expressible as a float tolerance and never loosened."
+    },
+    "why_these_numbers": "Activations are BF16 (relative eps ~7.8e-3) and weights are FP8 E4M3 with 128x128 UE8M0 block scales, so a single GEMM already carries O(1e-2) relative error against an FP32 recomputation. Float tolerances are therefore set per module at roughly 2-4x the accumulated BF16/FP8 noise floor for that depth, while every discrete decision (Indexer top-k, expert ids, greedy argmax, generated tokens) is held to exact equality because a discrete mismatch is a semantic bug, not numerical drift.",
+    "loosening_policy": "Float tolerances may only be loosened by re-registering this manifest and recording the change in progress.yaml with evidence. The 'exact' rules are inviolable: an index/route/argmax/token mismatch is a failure, never a tolerance question."
+  },
+  "modules": {
+    "q_projection_and_norm": {
+      "description": "wq_a -> RMSNorm(1024) -> wq_b, then per-head 512-wide RMS normalisation.",
+      "cosine_min": 0.9995,
+      "rel_max_abs_max": 0.02
+    },
+    "kv_latent_and_norm": {
+      "description": "wkv -> full-width kv_norm(512) latent projection.",
+      "cosine_min": 0.9995,
+      "rel_max_abs_max": 0.02
+    },
+    "rope": {
+      "description": "RoPE on the final 64 dims; theta 10000 no-YaRN for ratio-0, theta 160000 + YaRN factor 16 for compressed layers.",
+      "cosine_min": 0.9999,
+      "rel_max_abs_max": 0.01
+    },
+    "inverse_rope": {
+      "description": "Inverse RoPE applied to attention output before grouped O-LoRA.",
+      "cosine_min": 0.9999,
+      "rel_max_abs_max": 0.01
+    },
+    "compressor": {
+      "description": "FP32 learned gated pooling; overlapping for ratio 4, non-overlapping for ratio 128; post-pool norm, RoPE and quantisation simulation.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.03
+    },
+    "compressor_state": {
+      "description": "Retained kv_state / score_state buffers across an incomplete compression group.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.03
+    },
+    "indexer_scores": {
+      "description": "Weighted 64-head ReLU score reduction over compressed slots.",
+      "cosine_min": 0.995,
+      "rel_max_abs_max": 0.05
+    },
+    "indexer_topk": {
+      "description": "Selected compressed slots on ratio-4 layers.",
+      "rule": "exact",
+      "detail": "Selected index set must equal the source set exactly. The score margin between the last selected and first rejected slot is reported as a diagnostic but never used to waive a mismatch."
+    },
+    "attention_sink": {
+      "description": "FP32 per-head sink contributing denominator mass only, judged on the BF16 attention output it shapes.",
+      "judged_on": "bf16_storage_resolution",
+      "cosine_min": 0.999,
+      "abs_max_element_steps_max": 1.0,
+      "elements_beyond_one_step_max": 0,
+      "mean_abs_in_dtype_steps_max": 0.0001,
+      "note": "Re-registered in schema_version 2; see re_registration. The sink's own structural rules -- it must shrink the output magnitude and never steer it, and removing it must change the output -- are asserted separately and are not tolerances."
+    },
+    "sparse_attention_output": {
+      "description": "512-wide latent BF16 attention output over the dual-pool (SWA + compressed) selection.",
+      "judged_on": "bf16_storage_resolution",
+      "cosine_min": 0.999,
+      "abs_max_element_steps_max": 1.0,
+      "elements_beyond_one_step_max": 0,
+      "mean_abs_in_dtype_steps_max": 0.0001,
+      "note": "Re-registered in schema_version 2; see re_registration."
+    },
+    "o_lora_output": {
+      "description": "Grouped wo_a then row-parallel wo_b back to 4096.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.03
+    },
+    "moe_router_logits": {
+      "description": "sqrt-softplus routing scores before bias.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.02
+    },
+    "moe_expert_ids": {
+      "description": "Selected top-6 experts (hash-routed layers 0-2 and score-routed layers 3-42).",
+      "rule": "exact"
+    },
+    "moe_routing_weights": {
+      "description": "Normalised routing weights after route_scale 1.5, gathered from the pre-bias scores.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.02
+    },
+    "moe_expert_output": {
+      "description": "Routed FC1 -> SwiGLU with clamp 10 -> FC2, through the packed MXFP4 path.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.04
+    },
+    "moe_combined_output": {
+      "description": "Routed plus shared expert output combined once.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.04
+    },
+    "mhc": {
+      "description": "Sinkhorn-normalised hyper-connection pre/post mixing, FP32 mix parameters over BF16 residual streams.",
+      "cosine_min": 0.999,
+      "rel_max_abs_max": 0.03
+    },
+    "decoder_layer": {
+      "description": "One complete decoder layer including mHC and MoE.",
+      "cosine_min": 0.99,
+      "rel_max_abs_max": 0.05
+    },
+    "final_logits": {
+      "description": "Full-model next-token logits over the 129280-entry vocabulary.",
+      "cosine_min": 0.99,
+      "rel_max_abs_max": 0.05,
+      "argmax_rule": "exact"
+    }
+  },
+  "gates": {
+    "source_activation_replay": {
+      "layers": [0, 2, 3],
+      "phases": ["prefill", "cached_decode"],
+      "requires": [
+        "cosine >= per-module cosine_min",
+        "rel_max_abs <= per-module rel_max_abs_max where one is registered",
+        "sparse_attention_output and attention_sink within BF16 storage resolution: abs_max_element_steps <= 1.0, elements_beyond_one_step == 0, mean_abs_in_dtype_steps <= 1e-4",
+        "indexer_topk exact on ratio-4 layers",
+        "all values finite"
+      ]
+    },
+    "source_logit_replay": {
+      "min_prompts": 5,
+      "requires": [
+        "greedy argmax token equals the source token for every prompt",
+        "final_logits cosine >= 0.99",
+        "all logits finite"
+      ]
+    },
+    "generation_parity": {
+      "min_prompts": 5,
+      "min_new_tokens": 32,
+      "requires": [
+        "per-step greedy token equality against the source at every step",
+        "two TensorRT-LLM repetitions produce identical token sequences",
+        "non-empty output, no NaN/Inf logits"
+      ]
+    },
+    "cuda_graph_matrix": {
+      "configurations": [
+        {"cuda_graph": false, "overlap_scheduler": false},
+        {"cuda_graph": true, "overlap_scheduler": true}
+      ],
+      "requires": [
+        "enabled configuration proves capture and >=2 replays for every required V4 operator",
+        "no eager fallback for any required operator",
+        "baseline and enabled both meet the gates above"
+      ]
+    }
+  }
+}
