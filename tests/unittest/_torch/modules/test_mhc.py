@@ -1250,8 +1250,13 @@ def _assert_graph_replay_matches_eager(runner, inputs, tactic):
 @pytest.mark.parametrize(
     "tactic",
     [
-        ("fused_half_mma", 0, 64, 512, 1),
-        ("fused_all_mma", 0, 64, 0, 1),
+        # Both tactics are tcgen05 TF32 MMA, which `fused_tf32_pmap_gemm.cuh`
+        # hard-asserts to sm_100a. Requesting one on Hopper aborts the process
+        # and poisons the CUDA context for every later test in the session, so
+        # they carry the same marker the MMA params of
+        # `test_mhc_fused_hc_realistic_scale_regression` already use.
+        pytest.param(("fused_half_mma", 0, 64, 512, 1), marks=skip_pre_blackwell),
+        pytest.param(("fused_all_mma", 0, 64, 0, 1), marks=skip_pre_blackwell),
     ],
 )
 def test_mhc_fused_hc_cuda_graph_high_splitk_tactics(n: int, tactic):
@@ -1265,12 +1270,17 @@ def test_mhc_fused_hc_cuda_graph_high_splitk_tactics(n: int, tactic):
     _assert_graph_replay_matches_eager(runner, inputs, tactic)
 
 
+@skip_pre_blackwell
 def test_mhc_fused_hc_cuda_graph_decode_buckets_then_prefill():
     """Capture reduced-autotune decode buckets, then run the large prefill path.
 
     The CI failure happened after CUDA graph warmup for decode buckets and on
     the subsequent M=8192 warmup. This test keeps that ordering local to
     fused_hc and covers both PR-selected M=8192 MMA tactics.
+
+    Every tactic it names is tcgen05 TF32 MMA, which `fused_tf32_pmap_gemm.cuh`
+    hard-asserts to sm_100a; on Hopper the abort also poisons the CUDA context
+    for the rest of the session, so the whole test is Blackwell-only.
     """
     hidden_size = 4096
     hc_mult = 4
@@ -1591,6 +1601,509 @@ def main():
     print("=" * 90)
     _print_bench_timing_table(bench_stats)
     print("\n" + "=" * 90)
+
+
+# ---------------------------------------------------------------------------
+# DeepSeek-V4 on Hopper (SM90): the FMA ladder is the only fused path, and it
+# has to agree with the checkpoint's own mHC rather than only with itself.
+#
+# The tcgen05 TF32 paths ("fused_*_mma") need SM100, so on Hopper the module
+# must fall back to the FP32 FMA kernels. These tests carry `sm90` in their
+# names so the DeepSeek-V4 Hopper gate selects them.
+# ---------------------------------------------------------------------------
+
+
+def _dsv4_mhc_goldens():
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    name = "deepseek_v4_flash_h100_torch_goldens"
+    if name in sys.modules:
+        return sys.modules[name]
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "integration"
+        / "defs"
+        / "accuracy"
+        / "deepseek_v4_flash_h100"
+        / "torch_goldens.py"
+    )
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _dsv4_mhc_tolerance():
+    import json
+    from pathlib import Path
+
+    path = (
+        Path(__file__).resolve().parents[3]
+        / "integration"
+        / "defs"
+        / "accuracy"
+        / "deepseek_v4_flash_h100"
+        / "manifests"
+        / "tolerances.json"
+    )
+    return json.loads(path.read_text())["modules"]["mhc"]
+
+
+# Checkpoint mHC contract: multiplier 4, 20 Sinkhorn iterations, eps 1e-6,
+# and the source's `post = 2 * sigmoid(...)` expansion gain.
+_DSV4_HC_MULT = 4
+_DSV4_SINKHORN_ITERS = 20
+_DSV4_EPS = 1e-6
+_DSV4_POST_MULT = 2.0
+
+
+def _dsv4_mhc_module(hidden_size: int, data):
+    module = mHC(
+        mult=_DSV4_HC_MULT,
+        hidden_size=hidden_size,
+        sinkhorn_iters=_DSV4_SINKHORN_ITERS,
+        dtype=None,
+        eps=_DSV4_EPS,
+        norm_eps=_DSV4_EPS,
+        sinkhorn_eps=_DSV4_EPS,
+        post_mult_value=_DSV4_POST_MULT,
+    ).cuda()
+    module.fn.copy_(data["fn"])
+    module.scale.copy_(data["hc_scale"])
+    module.base.copy_(data["hc_base"])
+    return module
+
+
+@pytest.mark.skipif(
+    torch.cuda.is_available() and _mhc_fused_hc_mma_available(),
+    reason="MMA tactics are available; this is the pre-Blackwell expectation",
+)
+def test_mhc_sm90_offers_only_fma_tactics_and_falls_back_to_fma():
+    """On Hopper the tcgen05 TF32 mHC paths must be absent, not merely unused.
+
+    Selecting an MMA tactic on SM90 fails at capture or launch time rather
+    than degrading, so the autotuner's *candidate list* is what has to be
+    clean --- checking only the chosen tactic would pass even if a bad one
+    were still reachable.
+    """
+    from tensorrt_llm._torch.modules.mhc.mhc_cuda import (
+        _FUSED_HC_FALLBACK_TACTIC_FMA,
+        _fused_hc_mma_supported,
+        _get_fused_hc_fallback_tactic,
+    )
+    from tensorrt_llm._utils import get_sm_version
+
+    assert get_sm_version() < 100
+    assert not _fused_hc_mma_supported()
+    assert _get_fused_hc_fallback_tactic(4096) == _FUSED_HC_FALLBACK_TACTIC_FMA
+    assert _get_fused_hc_fallback_tactic(None) == _FUSED_HC_FALLBACK_TACTIC_FMA
+    backend, *_ = _FUSED_HC_FALLBACK_TACTIC_FMA
+    assert backend.endswith("_fma")
+
+
+def test_mhc_dsv4_sm100_pre_mapping_still_offers_the_tf32_deepgemm_tactics(monkeypatch):
+    """The SM90 guard withholds the TF32 ladder; it must not delete it.
+
+    Mocked rather than skipped. This machine is Hopper, so a guard that dropped
+    the DeepGEMM tactics on *every* architecture would look identical here to
+    one that only withholds them below SM100 --- and the Blackwell mHC path is
+    protected behaviour with no GPU here to measure it on. Both halves are
+    driven through the real ``get_valid_tactics`` with only the compute
+    capability faked.
+    """
+    from tensorrt_llm._torch.modules.mhc import mhc_cuda
+
+    # The predicate itself, as a function of compute capability.
+    try:
+        for sm, expected in ((90, False), (100, True), (103, True)):
+            mhc_cuda._pre_mapping_tf32_allowed.cache_clear()
+            monkeypatch.setattr(mhc_cuda, "get_sm_version", lambda sm=sm: sm)
+            assert mhc_cuda._pre_mapping_tf32_allowed() is expected, (
+                f"sm{sm} should {'offer' if expected else 'withhold'} the TF32 tactics"
+            )
+    finally:
+        monkeypatch.undo()
+        mhc_cuda._pre_mapping_tf32_allowed.cache_clear()
+
+    # And the candidate list it gates, with DeepGEMM forced present so the
+    # result reflects the guard rather than this container's packages.
+    runner = mhc_cuda.MhcPreMappingRunner(
+        n=_DSV4_HC_MULT,
+        hidden_size=4096,
+        rms_eps=_DSV4_EPS,
+        hc_pre_eps=_DSV4_EPS,
+        hc_sinkhorn_eps=_DSV4_EPS,
+        hc_post_mult_value=_DSV4_POST_MULT,
+        sinkhorn_repeat=_DSV4_SINKHORN_ITERS,
+    )
+    mix_hc = (2 + _DSV4_HC_MULT) * _DSV4_HC_MULT
+    inputs = [None, torch.empty((mix_hc, 1), device="meta")]
+    monkeypatch.setattr(mhc_cuda, "_get_dg_fn", lambda: object())
+
+    monkeypatch.setattr(mhc_cuda, "_pre_mapping_tf32_allowed", lambda: False)
+    hopper = runner.get_valid_tactics(inputs, None)
+    monkeypatch.setattr(mhc_cuda, "_pre_mapping_tf32_allowed", lambda: True)
+    blackwell = runner.get_valid_tactics(inputs, None)
+
+    dg_hopper = [t for t in hopper if str(t[0]).startswith("dg_")]
+    dg_blackwell = [t for t in blackwell if str(t[0]).startswith("dg_")]
+    assert not dg_hopper, f"Hopper still offers {dg_hopper}"
+    assert {t[0] for t in dg_blackwell} == {"dg_splitk", "dg_nosplit"}, (
+        f"Blackwell lost the DeepGEMM ladder: {dg_blackwell}"
+    )
+    assert [t for t in blackwell if t[0] == "fma"] == [t for t in hopper if t[0] == "fma"], (
+        "the guard changed the FMA ladder as well; it must only withhold the TF32 backends"
+    )
+
+
+def test_mhc_dsv4_source_faithful_post_mapping_selects_sm90_only(monkeypatch):
+    """The source-faithful post-mapping is scoped to the architecture it was measured on.
+
+    ``get_sm_version()`` returns ``-1`` with no visible CUDA device, so a
+    "below Blackwell" predicate would be *true* on a CPU/meta build and route
+    it onto a Triton kernel that cannot launch there. It would also change the
+    numerics of every Ada/Ampere/Turing deployment, none of which this bring-up
+    has run. Both are silent, so they are pinned here rather than argued: the
+    predicate is exercised at ``-1``, ``90``, ``100`` and ``103`` with only the
+    compute capability faked, and a raising ``get_sm_version`` (no CUDA context
+    at all) must also keep the shipped kernel.
+    """
+    from tensorrt_llm import _utils
+    from tensorrt_llm._torch.modules.mhc import hyper_connection
+
+    def _select(sm_source):
+        hyper_connection._source_faithful_post_mapping.cache_clear()
+        monkeypatch.setattr(_utils, "get_sm_version", sm_source)
+        return hyper_connection._source_faithful_post_mapping()
+
+    def _raises():
+        raise RuntimeError("no CUDA context")
+
+    try:
+        for sm, expected in ((-1, False), (90, True), (100, False), (103, False)):
+            assert _select(lambda sm=sm: sm) is expected, (
+                f"sm{sm} should {'take' if expected else 'skip'} the source-faithful post-mapping"
+            )
+        assert _select(_raises) is False, "a raising get_sm_version must keep the CUDA kernel"
+    finally:
+        monkeypatch.undo()
+        hyper_connection._source_faithful_post_mapping.cache_clear()
+
+    # And on this machine, which is the architecture the path exists for.
+    assert _utils.get_sm_version() == 90
+    assert hyper_connection._source_faithful_post_mapping()
+
+
+@pytest.mark.parametrize("n", [1, 257])
+def test_mhc_sm90_post_mapping_is_bit_exact_with_the_deepseek_v4_source_expression(n: int):
+    """``post_mapping`` must reproduce ``Block.hc_post``, not merely approximate it.
+
+    The reference is a plain Torch expression, so its FP32 association is
+    reachable: each ``comb[k] * residual[k]`` is a rounded product, they are
+    summed in index order, and ``post * x`` is added last. The fused CUDA kernel
+    seeds an FMA chain with ``post * x`` instead. Both are correct arithmetic
+    and the FMA chain is the more accurate one, but they are not the same
+    number, and against the checkpoint's own BF16 output the difference reads as
+    a full storage step on the elements that straddle a rounding boundary.
+
+    The second assertion is what stops this from silently reverting: the
+    shipped CUDA kernel must be measurably *not* bit-exact on the same inputs,
+    so deleting the Hopper path fails here instead of passing on a tolerance.
+    """
+    from tensorrt_llm._torch.modules.mhc.hyper_connection import _source_faithful_post_mapping
+    from tensorrt_llm._torch.modules.mhc.mhc_cuda import mhc_post_mapping_cuda
+    from tensorrt_llm._utils import get_sm_version
+
+    assert get_sm_version() < 100
+    assert _source_faithful_post_mapping(), "the Hopper post-mapping path is not selected"
+
+    hidden = 4096
+    torch.random.manual_seed(29 + n)
+    residual = torch.randn((n, _DSV4_HC_MULT, hidden), dtype=torch.bfloat16, device="cuda")
+    x = torch.randn((n, hidden), dtype=torch.bfloat16, device="cuda")
+    post = torch.rand((n, _DSV4_HC_MULT), dtype=torch.float32, device="cuda") * _DSV4_POST_MULT
+    comb = torch.rand((n, _DSV4_HC_MULT, _DSV4_HC_MULT), dtype=torch.float32, device="cuda")
+
+    # `Block.hc_post` from the checkpoint's inference/model.py, verbatim.
+    reference = (
+        post.unsqueeze(-1) * x.unsqueeze(-2)
+        + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=1)
+    ).to(x.dtype)
+
+    module = mHC(
+        mult=_DSV4_HC_MULT,
+        hidden_size=hidden,
+        sinkhorn_iters=_DSV4_SINKHORN_ITERS,
+        dtype=None,
+        eps=_DSV4_EPS,
+        norm_eps=_DSV4_EPS,
+        sinkhorn_eps=_DSV4_EPS,
+        post_mult_value=_DSV4_POST_MULT,
+    ).cuda()
+
+    def differing(got):
+        return int(
+            (got.contiguous().view(torch.int16) != reference.contiguous().view(torch.int16)).sum()
+        )
+
+    got = module.post_mapping(x, residual, post, comb)
+    assert differing(got) == 0, (
+        f"post_mapping differs from the source expression on {differing(got)} of "
+        f"{reference.numel()} BF16 values"
+    )
+    fused = mhc_post_mapping_cuda(residual, x, post, comb, _DSV4_HC_MULT)
+    if n > 1:
+        assert differing(fused) > 0, (
+            "the shipped FMA kernel is already bit-exact here, so this test cannot "
+            "tell the Hopper path from its absence"
+        )
+
+
+def test_mhc_sm90_fused_hc_boundary_matches_the_source_expression_and_norm():
+    """The layer boundary must not keep an association the standalone call dropped.
+
+    ``fused_hc`` is the *default* boundary in ``modeling_deepseekv4`` --- the
+    standalone ``post_mapping`` only runs on the unfused, engram and DSpark
+    paths. Fixing one and not the other would leave the served model with the
+    FMA association while a layer replay, which necessarily calls the standalone
+    form, proved the source-faithful one. Measured before this was wired: 206 of
+    4,210,688 BF16 values apart.
+
+    The folded next-layer RMSNorm is checked in the same shot, because resolving
+    the boundary in two steps means this path applies that norm itself.
+    """
+    from tensorrt_llm._torch.modules.mhc.hyper_connection import _source_faithful_post_mapping
+    from tensorrt_llm._utils import get_sm_version
+
+    assert get_sm_version() < 100 and _source_faithful_post_mapping()
+
+    n, hidden = 257, 4096
+    torch.random.manual_seed(41)
+    residual = torch.randn((n, _DSV4_HC_MULT, hidden), dtype=torch.bfloat16, device="cuda")
+    x = torch.randn((n, hidden), dtype=torch.bfloat16, device="cuda")
+    post = torch.rand((n, _DSV4_HC_MULT), dtype=torch.float32, device="cuda") * _DSV4_POST_MULT
+    comb = torch.rand((n, _DSV4_HC_MULT, _DSV4_HC_MULT), dtype=torch.float32, device="cuda")
+    weight = torch.randn((hidden,), dtype=torch.bfloat16, device="cuda")
+
+    module = mHC(
+        mult=_DSV4_HC_MULT,
+        hidden_size=hidden,
+        sinkhorn_iters=_DSV4_SINKHORN_ITERS,
+        dtype=None,
+        eps=_DSV4_EPS,
+        norm_eps=_DSV4_EPS,
+        sinkhorn_eps=_DSV4_EPS,
+        post_mult_value=_DSV4_POST_MULT,
+    ).cuda()
+    module.fn.normal_(0, 1e-4)
+    module.base.normal_(0, 0.1)
+    module.scale.normal_(0, 0.1)
+
+    reference = (
+        post.unsqueeze(-1) * x.unsqueeze(-2)
+        + torch.sum(comb.unsqueeze(-1) * residual.unsqueeze(-2), dim=1)
+    ).to(x.dtype)
+    residual_cur, _, _, layer_input = module.fused_hc(x, residual, post, comb)
+    apart = int(
+        (
+            residual_cur.contiguous().view(torch.int16) != reference.contiguous().view(torch.int16)
+        ).sum()
+    )
+    assert apart == 0, f"fused_hc residual differs from the source expression on {apart} values"
+
+    # `RMSNorm.forward` from the checkpoint: FP32 throughout, one rounding.
+    _, _, _, normed = module.fused_hc(x, residual, post, comb, weight, _DSV4_EPS)
+    f = layer_input.float()
+    expected = (
+        weight.float() * (f * torch.rsqrt(f.square().mean(-1, keepdim=True) + _DSV4_EPS))
+    ).to(layer_input.dtype)
+    apart = int(
+        (normed.contiguous().view(torch.int16) != expected.contiguous().view(torch.int16)).sum()
+    )
+    assert apart == 0, f"the folded norm differs from the source RMSNorm on {apart} values"
+
+
+@pytest.mark.parametrize("n", [1, 257])
+def test_mhc_sm90_every_offered_pre_mapping_tactic_matches_the_source_golden(n: int):
+    """The autotuner picks on latency, so every *candidate* has to be accurate.
+
+    ``pre_mapping``'s tuner may offer a DeepGEMM backend alongside the FP32 FMA
+    ladder, and that backend runs the mix GEMM in TF32 --- 10 mantissa bits
+    against 23. The reference upcasts on purpose (``hc_pre`` computes its mixes
+    on ``x.flatten(2).float()``) and Sinkhorn turns a mix error straight into a
+    residual weight error, so on DeepSeek-V4-Flash layer 2 with 257 real tokens
+    the TF32 tactics scored ``rel_max_abs`` 1.71e-01 on ``layer_input`` where
+    every FMA tactic scored 1.07e-02.
+
+    Two assertions, because either alone is weak: the candidate list must carry
+    no TF32 backend below SM100, *and* every tactic it does carry must meet the
+    registered ``mhc`` tolerance against the independent golden. The first
+    without the second would pass a list of accurate-looking but wrong kernels;
+    the second without the first would pass whichever tactic happened to be
+    selected.
+    """
+    from tensorrt_llm._torch.modules.mhc.mhc_cuda import MhcPreMappingRunner
+    from tensorrt_llm._utils import get_sm_version
+
+    assert get_sm_version() < 100
+    tg = _dsv4_mhc_goldens()
+    limits = _dsv4_mhc_tolerance()
+    hidden_size = 4096
+    data = generate_pre_data(
+        n=n,
+        hc_mult=_DSV4_HC_MULT,
+        hidden_size=hidden_size,
+        hc_post_mult_value=_DSV4_POST_MULT,
+        sinkhorn_repeat=_DSV4_SINKHORN_ITERS,
+    )
+    residual = data["residual"].contiguous()
+    runner = MhcPreMappingRunner(
+        n=_DSV4_HC_MULT,
+        hidden_size=hidden_size,
+        rms_eps=_DSV4_EPS,
+        hc_pre_eps=_DSV4_EPS,
+        hc_sinkhorn_eps=_DSV4_EPS,
+        hc_post_mult_value=_DSV4_POST_MULT,
+        sinkhorn_repeat=_DSV4_SINKHORN_ITERS,
+    )
+    inputs = [
+        residual.view(n, _DSV4_HC_MULT * hidden_size),
+        data["fn"].contiguous(),
+        residual,
+        data["hc_scale"].contiguous(),
+        data["hc_base"].contiguous(),
+    ]
+    tactics = runner.get_valid_tactics(inputs, None)
+    assert tactics, "the pre_mapping tuner offered no tactic at all"
+    tf32 = [t for t in tactics if str(t[0]).startswith("dg_")]
+    assert not tf32, f"SM90 pre_mapping still offers the TF32 DeepGEMM tactics {tf32}"
+
+    ref_input, ref_post, ref_comb = tg.hc_pre(
+        residual.unsqueeze(0),
+        data["fn"],
+        data["hc_scale"],
+        data["hc_base"],
+        hc_mult=_DSV4_HC_MULT,
+        iters=_DSV4_SINKHORN_ITERS,
+        norm_eps=_DSV4_EPS,
+        hc_eps=_DSV4_EPS,
+    )
+    for tactic in tactics:
+        post_mix, comb_mix, layer_input = runner(inputs=inputs, tactic=tactic)
+        for label, got, ref in (
+            ("layer_input", layer_input, ref_input.squeeze(0)),
+            ("post_mix", post_mix.reshape(n, _DSV4_HC_MULT), ref_post.squeeze(0)),
+            ("comb_mix", comb_mix.reshape(n, _DSV4_HC_MULT, _DSV4_HC_MULT), ref_comb.squeeze(0)),
+        ):
+            m = tg.compare(got, ref)
+            assert m["finite"], f"tactic {tactic} {label}: non-finite"
+            assert m["cosine"] >= limits["cosine_min"], (
+                f"tactic {tactic} {label}: cosine {m['cosine']:.6f} < {limits['cosine_min']}"
+            )
+            assert m["rel_max_abs"] <= limits["rel_max_abs_max"], (
+                f"tactic {tactic} {label}: rel_max_abs {m['rel_max_abs']:.4f} > "
+                f"{limits['rel_max_abs_max']}"
+            )
+
+
+@pytest.mark.parametrize("n", [1, 32, 512])
+def test_mhc_sm90_pre_and_post_mapping_match_the_deepseek_v4_source_golden(n: int):
+    """The SM90 FMA kernels vs the checkpoint's own mHC, not vs each other.
+
+    `test_mhc_fused_hc` already pins fused against unfused; both are
+    TensorRT-LLM, so they would agree on a shared mistake. The reference here
+    is the independent DeepSeek-V4 ladder golden, gated by the pre-registered
+    `mhc` tolerance.
+    """
+    tg = _dsv4_mhc_goldens()
+    limits = _dsv4_mhc_tolerance()
+    hidden_size = 4096
+    data = generate_pre_data(
+        n=n,
+        hc_mult=_DSV4_HC_MULT,
+        hidden_size=hidden_size,
+        hc_post_mult_value=_DSV4_POST_MULT,
+        sinkhorn_repeat=_DSV4_SINKHORN_ITERS,
+    )
+    module = _dsv4_mhc_module(hidden_size, data)
+    residual = data["residual"]
+
+    post_mix, comb_mix, layer_input = module.pre_mapping(residual)
+    ref_input, ref_post, ref_comb = tg.hc_pre(
+        residual.unsqueeze(0),
+        data["fn"],
+        data["hc_scale"],
+        data["hc_base"],
+        hc_mult=_DSV4_HC_MULT,
+        iters=_DSV4_SINKHORN_ITERS,
+        norm_eps=_DSV4_EPS,
+        hc_eps=_DSV4_EPS,
+    )
+    for label, got, ref in (
+        ("layer_input", layer_input, ref_input.squeeze(0)),
+        ("post_mix", post_mix.reshape(n, _DSV4_HC_MULT), ref_post.squeeze(0)),
+        ("comb_mix", comb_mix.reshape(n, _DSV4_HC_MULT, _DSV4_HC_MULT), ref_comb.squeeze(0)),
+    ):
+        m = tg.compare(got, ref)
+        assert m["finite"], f"pre_mapping {label}: non-finite"
+        assert m["cosine"] >= limits["cosine_min"], (
+            f"pre_mapping {label}: cosine {m['cosine']:.6f} < {limits['cosine_min']}"
+        )
+        assert m["rel_max_abs"] <= limits["rel_max_abs_max"], (
+            f"pre_mapping {label}: rel_max_abs {m['rel_max_abs']:.4f} > {limits['rel_max_abs_max']}"
+        )
+
+    torch.random.manual_seed(13)
+    block_out = torch.randn((n, hidden_size), dtype=torch.bfloat16, device="cuda") / hidden_size
+    got_residual = module.post_mapping(block_out, residual, post_mix, comb_mix)
+    ref_residual = tg.hc_post(
+        block_out.unsqueeze(0), residual.unsqueeze(0), ref_post, ref_comb
+    ).squeeze(0)
+    m = tg.compare(got_residual, ref_residual)
+    assert m["finite"] and m["cosine"] >= limits["cosine_min"], (
+        f"post_mapping: cosine {m['cosine']:.6f}"
+    )
+    assert m["rel_max_abs"] <= limits["rel_max_abs_max"], (
+        f"post_mapping: rel_max_abs {m['rel_max_abs']:.4f} > {limits['rel_max_abs_max']}"
+    )
+
+
+def test_mhc_sm90_head_reduction_matches_the_deepseek_v4_source_golden():
+    """`HCHead` is a plain sigmoid gate with no Sinkhorn --- easy to conflate."""
+    tg = _dsv4_mhc_goldens()
+    limits = _dsv4_mhc_tolerance()
+    n, hidden_size = 64, 4096
+    torch.random.manual_seed(17)
+    x = (
+        torch.randn((n, _DSV4_HC_MULT, hidden_size), dtype=torch.bfloat16, device="cuda")
+        / hidden_size
+    )
+    fn = (
+        torch.randn((_DSV4_HC_MULT, _DSV4_HC_MULT * hidden_size), dtype=torch.float, device="cuda")
+        * 1e-4
+    )
+    scale = torch.randn((1,), dtype=torch.float, device="cuda") * 0.1
+    base = torch.randn((_DSV4_HC_MULT,), dtype=torch.float, device="cuda") * 0.1
+
+    head = HCHead(
+        mult=_DSV4_HC_MULT, hidden_size=hidden_size, eps=_DSV4_EPS, norm_eps=_DSV4_EPS
+    ).cuda()
+    head.fn.copy_(fn)
+    head.scale.copy_(scale)
+    head.base.copy_(base)
+
+    got = head(x)
+    ref = tg.hc_head(x.unsqueeze(0), fn, scale, base, norm_eps=_DSV4_EPS, hc_eps=_DSV4_EPS).squeeze(
+        0
+    )
+    m = tg.compare(got, ref)
+    assert m["finite"] and m["cosine"] >= limits["cosine_min"], f"hc_head: cosine {m['cosine']:.6f}"
+    assert m["rel_max_abs"] <= limits["rel_max_abs_max"], (
+        f"hc_head: rel_max_abs {m['rel_max_abs']:.4f} > {limits['rel_max_abs_max']}"
+    )
 
 
 if __name__ == "__main__":

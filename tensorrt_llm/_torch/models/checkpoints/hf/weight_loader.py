@@ -242,19 +242,30 @@ class HfWeightLoader(BaseWeightLoader):
         self._lazy_handles = []
         super().cleanup()
 
-    @staticmethod
-    def _is_kimi_k3_checkpoint(checkpoint_dir: str) -> bool:
-        """Kimi K3 checkpoints (~1.5 TB) must not be materialized in host RAM."""
+    #: Checkpoints whose weights are streamed rather than materialized.
+    #:
+    #: ``safetensors.torch.load_file`` copies every tensor into anonymous host
+    #: memory, once per rank. That is fine at a few tens of GB and fatal beyond:
+    #: Kimi K3 is ~1.5 TB, and DeepSeek-V4-Flash is 149 GB, which eight ranks
+    #: would turn into 1.2 TB of private pages. Both models' loaders read only
+    #: their rank-local shard, so the lazy path bounds host memory by what is
+    #: actually consumed.
+    _STREAMED_MODEL_TYPES = frozenset(
+        {"kimi_k3", "kimi_linear", "deepseek_v4"})
+
+    @classmethod
+    def _streams_rank_local_weights(cls, checkpoint_dir: str) -> bool:
+        """True when this checkpoint must not be materialized in host RAM."""
         config_path = os.path.join(checkpoint_dir, "config.json")
         if not os.path.isfile(config_path):
             return False
         # Do not swallow read/parse failures: every rank must take the same
-        # branch here (the non-Kimi path enqueues collectives), so a
-        # rank-local transient error routing one rank differently would
-        # deadlock the job. Propagating fails fast on all ranks instead.
+        # branch here (the eager path enqueues collectives), so a rank-local
+        # transient error routing one rank differently would deadlock the job.
+        # Propagating fails fast on all ranks instead.
         with open(config_path) as f:
             model_type = json.load(f).get("model_type")
-        return model_type in ("kimi_k3", "kimi_linear")
+        return model_type in cls._STREAMED_MODEL_TYPES
 
     def _load_lazy_safetensors(
             self,
@@ -309,8 +320,8 @@ class HfWeightLoader(BaseWeightLoader):
                      **kwargs) -> dict[str, Any]:
         """Load model weights keyed by checkpoint tensor name.
 
-        Kimi K3 checkpoint is opened lazily as HF SafeTensors to avoid materializing any part of the checkpoint
-        in CPU memory.
+        Checkpoints in `_STREAMED_MODEL_TYPES` are opened lazily as HF SafeTensors to avoid materializing any
+        part of the checkpoint in CPU memory.
         Other models' checkpoints may be prefetched in parallel to warm up the OS file cache if
         the CPU memory is large enough, before their tensors are loaded via mmap.
         when `_WEIGHT_CACHE_ENV` is on, other models can also use a CPU weight cache to accelerate repeated
@@ -318,7 +329,7 @@ class HfWeightLoader(BaseWeightLoader):
 
         Returns a `ConsumableWeightsDict` mapping checkpoint tensor names to tensors.
         """
-        if self._is_kimi_k3_checkpoint(checkpoint_dir):
+        if self._streams_rank_local_weights(checkpoint_dir):
             return self._load_lazy_safetensors(checkpoint_dir, use_consolidated)
         weight_files = glob.glob(f"{checkpoint_dir}/*.safetensors")
         # Some model checkpoint directories contain not only the sharded safetensors, but one

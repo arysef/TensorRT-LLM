@@ -34,6 +34,7 @@ from .fused_moe_cutlass import CutlassFusedMoE
 from .fused_moe_deepgemm import DeepGemmFusedMoE
 from .fused_moe_densegemm import DenseGEMMFusedMoE
 from .fused_moe_marlin import MarlinFusedMoE
+from .fused_moe_mxfp4_blockscale import BlockScaleMXFP4FusedMoE
 from .fused_moe_triton import TritonFusedMoE
 from .fused_moe_trtllm_gen import TRTLLMGenFusedMoE
 from .fused_moe_vanilla import VanillaMoE
@@ -73,13 +74,23 @@ IMPL_PRIORITY: Tuple[Type, ...] = (
     DenseGEMMFusedMoE,
     MarlinFusedMoE,
     TritonFusedMoE,
+    # Narrower than Cutlass and must outrank it: on a packed-MXFP4 checkpoint
+    # that declares block-scaled FP8 activations both are eligible, and only
+    # this one runs the activation contract the checkpoint was produced with.
+    BlockScaleMXFP4FusedMoE,
     CutlassFusedMoE,  # widest coverage, hence the fallback
     VanillaMoE,  # reference implementation, never preferred
 )
 
 # Family membership only; IMPL_PRIORITY decides try order.
+# ``BlockScaleMXFP4FusedMoE`` joins the CUTLASS family rather than getting a
+# literal of its own: it is never something an operator asks for by name --- it
+# is selected by the checkpoint's declared quantization contract --- and CUTLASS
+# is both the default literal on pre-Blackwell and the fallback every other
+# family degrades to. A family of its own would make it reachable only by
+# spelling a backend name that describes a checkpoint property.
 BACKEND_FAMILY: Dict[str, FrozenSet[Type]] = {
-    "CUTLASS": frozenset({CutlassFusedMoE}),
+    "CUTLASS": frozenset({BlockScaleMXFP4FusedMoE, CutlassFusedMoE}),
     "VANILLA": frozenset({VanillaMoE}),
     "MARLIN": frozenset({MarlinFusedMoE}),
     "CUTEDSL": frozenset({CuteDslB12xFusedMoE, CuteDslFusedMoE}),
@@ -216,6 +227,7 @@ def build_moe_problem(
 
     return MoEProblem(
         quant=canonical_quant(quant_algo),
+        act_scale_fmt=None if quant_config is None else getattr(quant_config, "scale_fmt", None),
         dtype_act=shapes.dtype if shapes.dtype is not None else torch.bfloat16,
         hidden_size=shapes.hidden_size,
         intermediate_size=shapes.intermediate_size,

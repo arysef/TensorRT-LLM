@@ -4,10 +4,15 @@
 # Multi-Head Hyper-Connection (mHC) module
 # Based on: "Hyper-Connections" (https://arxiv.org/abs/2409.19606)
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import torch
 from torch import nn
+
+from tensorrt_llm._torch.modules.mhc.mhc_triton import (
+    source_post_mapping as mhc_source_post_mapping,
+)
 
 
 @dataclass
@@ -51,6 +56,47 @@ class HCState:
         x_prev: torch.Tensor,
     ) -> "HCState":
         return cls(residual=residual, post_mix=post_mix, comb_mix=comb_mix, x_prev=x_prev)
+
+
+@lru_cache(maxsize=1)
+def _source_faithful_post_mapping() -> bool:
+    """Whether ``post_mapping`` runs the reference's own FP32 association.
+
+    The reference post-mapping is a plain Torch expression: every
+    ``comb[k] * residual[k]`` is rounded to FP32, they are summed in index
+    order, and ``post * x`` is added last. The fused CUDA kernel seeds an FMA
+    chain with ``post * x`` instead --- one rounding fewer per term, and by that
+    much a different number. On Hopper this takes the reference's bracketing
+    (see :mod:`tensorrt_llm._torch.modules.mhc.mhc_triton`), which makes the
+    post-mapping bit-exact against the checkpoint rather than merely close;
+    every other architecture keeps the fused kernel.
+
+    The predicate is exactly SM90 rather than "below Blackwell" on purpose.
+    ``get_sm_version()`` returns ``-1`` when no CUDA device is visible, so a
+    ``< 100`` test would route a CPU/meta build onto a Triton kernel it cannot
+    launch; and Ada/Ampere/Turing are outside this bring-up's measured
+    inventory, so silently changing their numerics would be an unevidenced
+    claim about architectures nothing here has run.
+    """
+    from tensorrt_llm._utils import get_sm_version
+
+    try:
+        return get_sm_version() == 90
+    except Exception:  # noqa: BLE001 - no CUDA context: keep the shipped kernel
+        return False
+
+
+def _source_rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """``RMSNorm.forward`` as the reference writes it: FP32 throughout, one rounding.
+
+    Used only on the Hopper ``fused_hc`` path, which resolves the boundary as
+    ``post_mapping`` then ``pre_mapping`` and therefore has to apply the
+    next-layer norm itself instead of getting it folded into the fused kernel's
+    epilogue.
+    """
+    f = x.float()
+    normalized = f * torch.rsqrt(f.square().mean(-1, keepdim=True) + eps)
+    return (weight.float() * normalized).to(x.dtype)
 
 
 try:
@@ -197,6 +243,27 @@ class mHC(nn.Module):
         post_mix_prev_flat = post_mix_prev.reshape(B, n)
         comb_mix_prev_flat = comb_mix_prev.reshape(B, n, n)
 
+        if _source_faithful_post_mapping():
+            # The boundary's post-mapping half is the same expression
+            # ``post_mapping`` implements, so on Hopper it runs through the same
+            # source-faithful kernel rather than the fused FMA chain. Without
+            # this the model's *default* boundary would keep an association that
+            # the standalone call no longer has --- measured at 206 differing
+            # BF16 values on 4,210,688 --- and the layer replay would be proving
+            # a property the served model does not have.
+            residual_cur = self.post_mapping(
+                x_prev_flat, residual_prev_flat, post_mix_prev_flat, comb_mix_prev_flat
+            )
+            post_mix_cur, comb_mix_cur, layer_input_cur = self.pre_mapping(residual_cur)
+            if norm_weight is not None:
+                layer_input_cur = _source_rms_norm(layer_input_cur, norm_weight, norm_eps)
+            return (
+                residual_cur.view(*outer_shape, n, hidden),
+                post_mix_cur.view(*outer_shape, n, 1),
+                comb_mix_cur.view(*outer_shape, n, n),
+                layer_input_cur.view(*outer_shape, hidden),
+            )
+
         residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur = mhc_fused_hc_cuda(
             x_prev_flat,
             residual_prev_flat,
@@ -240,13 +307,22 @@ class mHC(nn.Module):
         residual_flat = residual.view(-1, n, hidden)
         B = residual_flat.shape[0]
 
-        out = mhc_post_mapping_cuda(
-            residual_flat,
-            x.reshape(B, hidden),
-            post_layer_mix.view(B, n),
-            comb_res_mix.view(B, n, n),
-            n,
-        )
+        if _source_faithful_post_mapping():
+            out = mhc_source_post_mapping(
+                residual_flat,
+                x.reshape(B, hidden),
+                post_layer_mix.view(B, n),
+                comb_res_mix.view(B, n, n),
+                n,
+            )
+        else:
+            out = mhc_post_mapping_cuda(
+                residual_flat,
+                x.reshape(B, hidden),
+                post_layer_mix.view(B, n),
+                comb_res_mix.view(B, n, n),
+                n,
+            )
         return out.view(*outer_shape, n, hidden)
 
 
